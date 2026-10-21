@@ -18,6 +18,14 @@ Actions (JSON list):
   {"do": "type",   "text": "poc@mockmail.test"}
   {"do": "key",    "code": 36}              # hardware keycode, 36 = Return
   {"do": "swipe",  "x": 195, "y": 600, "to_y": 250, "steps": 12}
+  {"do": "clickrow","row": 2}               # live-measured row, fails loudly if absent
+  {"do": "clickgreen"}                      # live-measured green button, fails loudly
+  {"do": "open_provider", "x": 200, "y": 629}  # tap "Other email provider" and retry
+                                            # until the SetupImap form is really up
+                                            # (green Connect below y=700 AND >=10 rows)
+  {"do": "devshot", "name": "baseline-empty"}  # device-pixel screenshot
+  {"do": "assert_diff", "ref": "baseline-empty", "min_delta": 1.0}  # tripwire: the
+                                            # screen must have changed (input landed)
   {"do": "sleep",  "seconds": 3}
   {"do": "shot",   "name": "after-connect"}
   {"do": "expect", "name": "setup-screen"}   # screenshot for human review
@@ -275,6 +283,83 @@ def main():
                 run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
                 time.sleep(float(act.get("wait", 1.5)))
                 print(f"[{i}] clickgreen device({found[0]},{found[1]}) -> screen({sx:.0f},{sy:.0f})")
+            elif kind == "open_provider":
+                # Tap "Other email provider" and retry until the SetupImap form is
+                # verifiably on screen. This gate exists because a blind click list
+                # once walked straight through the Privacy webview and typed into
+                # nothing. The form counts as up only when a wide green primary
+                # button sits below y=700 AND at least 10 text rows are detectable:
+                # the welcome screen has no green button at all, and a pushed
+                # webview can have green pixels but never a bottom-anchored one.
+                x = float(act.get("x", 200))
+                y = float(act.get("y", 629))
+                deadline = time.time() + float(act.get("timeout", 90))
+                attempt = 0
+                up = False
+                while time.time() < deadline:
+                    attempt += 1
+                    probe = device_shot(os.path.join(args.out, "open-provider-probe.png"))
+                    rows = detect_rows(probe, device_h=args.device_height)
+                    green = find_green(probe, device_h=args.device_height)
+                    if green and green[1] > 700 and len(rows) >= 10:
+                        up = True
+                        print(f"[{i}] open_provider: form already up (green {green}, {len(rows)} rows)")
+                        break
+                    if green and green[1] <= 700:
+                        # webview-like screen (e.g. Privacy): pop it first
+                        bx, by = to_screen(30, 115)
+                        run(["cliclick", f"m:{bx:.0f},{by:.0f}"])
+                        time.sleep(0.2)
+                        run(["cliclick", f"c:{bx:.0f},{by:.0f}"])
+                        time.sleep(2.0)
+                        print(f"[{i}] open_provider: webview detected (green {green}), pressed back")
+                    sx, sy = to_screen(x, y)
+                    run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                    time.sleep(0.2)
+                    run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                    t2 = min(time.time() + float(act.get("per_try", 15)), deadline)
+                    while time.time() < t2:
+                        time.sleep(2.0)
+                        probe = device_shot(os.path.join(args.out, "open-provider-probe.png"))
+                        rows = detect_rows(probe, device_h=args.device_height)
+                        green = find_green(probe, device_h=args.device_height)
+                        if green and green[1] > 700 and len(rows) >= 10:
+                            up = True
+                            break
+                    if up:
+                        break
+                    print(f"[{i}] open_provider attempt {attempt}: form not up yet "
+                          f"(green={green}, rows={len(rows)})")
+                if not up:
+                    raise RuntimeError("open_provider: SetupImap form never appeared")
+                print(f"[{i}] open_provider: form up after {attempt} attempt(s)")
+            elif kind == "devshot":
+                path = os.path.join(args.out, act["name"] + ".png")
+                device_shot(path)
+                print(f"[{i}] devshot {path}")
+            elif kind == "assert_diff":
+                # Tripwire: prove the screen actually changed since a reference
+                # device shot. Catches "every step ok but nothing was typed".
+                from PIL import Image
+                ref_path = os.path.join(args.out, act["ref"] + ".png")
+                cur_path = os.path.join(args.out, "assert-diff-current.png")
+                device_shot(cur_path)
+                a = Image.open(ref_path).convert("L").resize((402, 874))
+                b = Image.open(cur_path).convert("L").resize((402, 874))
+                pa, pb = a.load(), b.load()
+                total = 0
+                n = 0
+                for yy in range(0, 874, 3):
+                    for xx in range(0, 402, 3):
+                        total += abs(pa[xx, yy] - pb[xx, yy])
+                        n += 1
+                mean = total / float(n)
+                thr = float(act.get("min_delta", 1.0))
+                print(f"[{i}] assert_diff vs {act['ref']}: mean|dL|={mean:.2f} (need >{thr})")
+                if mean <= thr:
+                    raise RuntimeError(
+                        f"assert_diff: screen unchanged vs {act['ref']} "
+                        f"(mean {mean:.2f}) - input never landed")
             elif kind == "sleep":
                 time.sleep(float(act["seconds"]))
                 print(f"[{i}] sleep {act['seconds']}s")

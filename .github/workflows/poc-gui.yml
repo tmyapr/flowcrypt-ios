@@ -193,9 +193,8 @@ jobs:
 
       - name: Run action script
         if: ${{ github.event.inputs.actions != '' }}
-        continue-on-error: true
         run: |
-          set -uo pipefail
+          set -euo pipefail
           UDID='${{ steps.sim.outputs.udid }}'
           DW=$(sips -g pixelWidth "$OUT/calib-device.png" | tail -1 | awk '{print $2}')
           DH=$(sips -g pixelHeight "$OUT/calib-device.png" | tail -1 | awk '{print $2}')
@@ -206,7 +205,7 @@ jobs:
           python3 poc/scripts/gui_drive.py \
             --actions '${{ github.event.inputs.actions }}' \
             --out "$OUT" --device-width "$PW" --device-height "$PH" \
-            --map "$OUT/gui-mapping.json" || echo "driver exited non-zero"
+            --map "$OUT/gui-mapping.json"
           xcrun simctl io "$UDID" screenshot "$OUT/after-actions-device.png" || true
           screencapture -x "$OUT/after-actions-desktop.png" || true
           echo "--- imap.log ---"; cat /tmp/mock_mail/imap.log || true
