@@ -1,0 +1,121 @@
+name: gui-probe
+
+# What UI-driving options actually work on this runner, given that any
+# XCTest-based runner (WebDriverAgent, or a hand-written XCUITest bundle) is
+# blocked by the missing lib_TestingInterop.dylib?
+#
+# Candidates, all independent of XCTest:
+#   1. idb_companion (FBSimulatorControl) -- sends HID events straight to
+#      CoreSimulator, no WDA, no TCC/Accessibility permission needed
+#   2. cliclick / System Events -- clicks the Simulator window (needs TCC)
+#   3. screencapture -- can we even see the desktop?
+#
+# This probe installs what it can and reports which route is alive.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+
+jobs:
+  probe:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode + boot a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          PICKED=""
+          for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
+          done
+          [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          xcodebuild -version
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          for rt,devs in d.items():
+              for dev in devs:
+                  if "iPhone" in dev["name"] and dev.get("isAvailable"):
+                      print(dev["udid"]); raise SystemExit
+          raise SystemExit("no iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          echo "booted $UDID"
+
+      - name: Is there a real display?
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          echo "=== displays ==="
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
+          echo "=== screencapture ==="
+          screencapture -x out/desktop1.png 2>&1 || echo "screencapture FAILED"
+          ls -la out/desktop1.png 2>/dev/null || true
+          file out/desktop1.png 2>/dev/null || true
+          echo "=== GUI session ==="
+          who || true
+          launchctl managername 2>/dev/null || true
+
+      - name: Open Simulator.app and screenshot it
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          open -a Simulator --args -CurrentDeviceUDID "$UDID" 2>&1 || echo "open failed"
+          sleep 25
+          screencapture -x out/desktop2.png 2>&1 || echo "screencapture failed"
+          ls -la out/desktop2.png 2>/dev/null || true
+          echo "=== windows owned by Simulator ==="
+          osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 | head -5 || true
+
+      - name: Route 1 - idb_companion (no XCTest, no TCC)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "=== installing idb-companion (may take a few minutes) ==="
+          brew tap facebook/fb 2>&1 | tail -2 || true
+          brew install facebook/fb/idb-companion 2>&1 | tail -15 || echo "BREW_INSTALL_FAILED"
+          which idb_companion || true
+          if command -v idb_companion >/dev/null; then
+            idb_companion --version 2>&1 | head -3 || true
+            echo "=== list targets ==="
+            timeout 60 idb_companion --list 1 2>&1 | head -20 || true
+          fi
+          echo "=== install fb-idb python client ==="
+          python3 -m pip install --quiet fb-idb 2>&1 | tail -5 || echo "PIP_FAILED"
+          python3 -c "import idb; print('fb-idb ok')" 2>&1 || true
+
+      - name: Route 2 - cliclick + System Events (needs TCC)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          brew install cliclick 2>&1 | tail -5 || echo "CLICLICK_INSTALL_FAILED"
+          which cliclick || true
+          echo "=== cliclick move test ==="
+          ( cliclick m:200,300 && echo "cliclick move OK" ) 2>&1 || echo "cliclick BLOCKED"
+          echo "=== System Events keystroke test ==="
+          osascript -e 'tell application "System Events" to key code 48' 2>&1 || echo "osascript keystroke BLOCKED"
+          echo "=== can we read window geometry? ==="
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1' 2>&1 || echo "window geometry BLOCKED"
+
+      - name: Route 3 - simctl-only sanity
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          xcrun simctl io "$UDID" screenshot out/simshot.png && echo "simctl screenshot OK"
+          ls -la out/simshot.png
+          echo "=== does simctl expose any input command? ==="
+          xcrun simctl help 2>&1 | grep -iE "key|tap|touch|input|ui " || echo "no input subcommand"
+
+      - name: Upload probe output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-probe-${{ github.run_id }}
+          path: out
