@@ -1,0 +1,9 @@
+{
+  "name": "flowcrypt-imap-log-poc-appium",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Appium/XCUITest driver for the FlowCrypt IMAP credential logging PoC",
+  "dependencies": {
+    "webdriverio": "^9.0.0"
+  }
+}
