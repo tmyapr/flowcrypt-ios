@@ -178,7 +178,7 @@ def changed(a, b):
     return mean
 
 
-def tap_green(y_from=560, y_to=874, save=None):
+def tap_green(y_from=560, y_to=874, save=None, tries=3):
     """Tap the centre of the big green primary button, wherever the layout put it.
 
     Coordinates measured once go stale the moment a keyboard appears or the form
@@ -188,27 +188,42 @@ def tap_green(y_from=560, y_to=874, save=None):
     from PIL import Image
 
     p = os.path.join(TMP, "device.png")
-    device_shot(p)
-    im = Image.open(p).convert("RGB").resize(DEVICE_POINTS)
-    if save:
-        im.save(save)
-    w, h = im.size
-    px = im.load()
-    pts = []
-    for yy in range(max(0, y_from), min(h, y_to)):
-        for xx in range(w):
-            r, g, b = px[xx, yy]
-            if g > 90 and g > r * 1.35 and g > b * 1.25:
-                pts.append((xx, yy))
-    if len(pts) < 500:
-        print(f"tapgreen: only {len(pts)} green pixels below y={y_from} -- not tapping")
-        return False
-    xs = [p0[0] for p0 in pts]
-    ys = [p0[1] for p0 in pts]
-    cx, cy = int(sum(xs) / len(xs)), int(sum(ys) / len(ys))
-    print(f"tapgreen: {len(pts)} px bbox=({min(xs)},{min(ys)})-({max(xs)},{max(ys)}) centre=({cx},{cy})")
-    click_at(cx, cy)
-    return True
+    before = os.path.join(TMP, "before.png")
+    after = os.path.join(TMP, "after.png")
+    for attempt in range(1, tries + 1):
+        device_shot(p)
+        im = Image.open(p).convert("RGB").resize(DEVICE_POINTS)
+        if save:
+            im.save(save)
+        w, h = im.size
+        px = im.load()
+        pts = []
+        for yy in range(max(0, y_from), min(h, y_to)):
+            for xx in range(w):
+                r, g, b = px[xx, yy]
+                if g > 90 and g > r * 1.35 and g > b * 1.25:
+                    pts.append((xx, yy))
+        if len(pts) < 500:
+            print(f"tapgreen: only {len(pts)} green pixels below y={y_from} -- not tapping")
+            return False
+        xs = [p0[0] for p0 in pts]
+        ys = [p0[1] for p0 in pts]
+        cx, cy = int(sum(xs) / len(xs)), int(sum(ys) / len(ys))
+        print(f"tapgreen: {len(pts)} px bbox=({min(xs)},{min(ys)})-({max(xs)},{max(ys)}) "
+              f"centre=({cx},{cy}) attempt={attempt}")
+        im.save(before)
+        geo = geom()
+        sx, sy = to_screen(cx, cy, geo)
+        activate()
+        subprocess.run(["cliclick", f"m:{sx},{sy}", "w:250", f"c:{sx},{sy}"], check=True)
+        time.sleep(3.0)
+        device_shot(after)
+        d = changed(before, after)
+        print(f"tapgreen diff={d:.2f}")
+        if d >= 1.0:
+            return True
+        print("  nothing happened after the colour tap -- retrying")
+    return False
 
 
 def to_screen(dx, dy, geo):
@@ -235,6 +250,34 @@ def click_at(dx, dy):
     time.sleep(0.5)
 
 
+def tap_nav(dx, dy, tries=4, min_diff=1.0):
+    """Tap something that should change the screen, and prove that it did.
+
+    On this runner the first click after a screenshot often gets swallowed --
+    the window regains focus and eats it -- so a fire-and-forget click silently
+    leaves the app on the old screen and every later coordinate is then wrong.
+    Measuring the screen before and after turns that into a visible failure the
+    loop can retry instead of a mystery.
+    """
+    before = os.path.join(TMP, "before.png")
+    after = os.path.join(TMP, "after.png")
+    for attempt in range(1, tries + 1):
+        geo = geom()
+        sx, sy = to_screen(dx, dy, geo)
+        activate()  # as late as possible: the click must land on Simulator
+        device_shot(before)
+        subprocess.run(["cliclick", f"m:{sx},{sy}", "w:250", f"c:{sx},{sy}"], check=True)
+        time.sleep(2.0)
+        device_shot(after)
+        d = changed(before, after)
+        print(f"tapnav device=({dx},{dy}) screen=({sx},{sy}) attempt={attempt} diff={d:.2f}")
+        if d >= min_diff:
+            return True
+        print("  screen did not change -- retrying the tap")
+    print(f"tapnav gave up at ({dx},{dy}): the screen never changed")
+    return False
+
+
 def paste_text(text):
     """Paste via clipboard: reliable for @ . ! and anything else."""
     subprocess.run(["pbcopy"], input=text, text=True, check=True)
@@ -250,6 +293,28 @@ def type_text(text):
         print(f"typed {len(text)} chars")
     else:
         paste_text(text)
+
+
+def type_into(dx, dy, text, tries=3):
+    """Focus a text field, paste, and check that the field actually changed."""
+    before = os.path.join(TMP, "before.png")
+    after = os.path.join(TMP, "after.png")
+    # moving the caret from one field to the next is a tiny visual change, so a
+    # strict threshold would reject a perfectly good tap and retry four times
+    if not tap_nav(dx, dy, tries=tries, min_diff=0.2):
+        print(f"type_into: tapping ({dx},{dy}) never changed the screen (no keyboard?)")
+        return False
+    for attempt in range(1, 3):
+        device_shot(before)
+        paste_text(text)
+        time.sleep(1.2)
+        device_shot(after)
+        d = changed(before, after)
+        print(f"type_into ({dx},{dy}) attempt={attempt} diff={d:.2f}")
+        if d >= 0.3:
+            return True
+        print("  field looks unchanged -- retrying the paste")
+    return False
 
 
 def swipe(x1, y1, x2, y2):
@@ -342,6 +407,11 @@ def main():
         click_at(int(sys.argv[2]), int(sys.argv[3]))
     elif cmd == "paste":
         paste_text(sys.argv[2])
+    elif cmd == "tapnav":
+        md = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
+        tap_nav(int(sys.argv[2]), int(sys.argv[3]), min_diff=md)
+    elif cmd == "field":
+        type_into(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif cmd == "type":
         type_text(sys.argv[2])
     elif cmd == "swipe":
