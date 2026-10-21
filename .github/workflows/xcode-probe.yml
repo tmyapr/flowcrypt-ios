@@ -1,0 +1,77 @@
+name: xcode-probe
+
+# One-minute inventory of what the macOS runner actually gives us.
+#
+# Context: WebDriverAgent cannot be built on macos-15-intel with Xcode 26.3
+# because the simulator platform is missing lib_TestingInterop.dylib:
+#   error: lstat(.../iPhoneSimulator.platform/Developer/usr/lib/lib_TestingInterop.dylib)
+#   ** TEST BUILD FAILED **
+#
+# Before abandoning Appium we need to know:
+#   * which Xcode versions this image has
+#   * which of them ship that dylib
+#
+# No appium, no builds -- just facts, ~90 seconds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+
+jobs:
+  inventory:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inventory Xcode installs
+        run: |
+          set -uo pipefail
+          echo "=== sw_vers ==="
+          sw_vers
+          echo
+          echo "=== /Applications/Xcode*.app ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "none"
+          echo
+          echo "=== per-install facts ==="
+          for XC in /Applications/Xcode*.app; do
+            [ -d "$XC" ] || continue
+            echo "---- $XC ----"
+            dev="$XC/Contents/Developer"
+            if [ -x "$dev/usr/bin/xcodebuild" ]; then
+              DEVELOPER_DIR="$dev" xcodebuild -version 2>&1 | head -3
+            else
+              echo "(no xcodebuild)"
+              continue
+            fi
+            simlib="$dev/Platforms/iPhoneSimulator.platform/Developer/usr/lib/lib_TestingInterop.dylib"
+            devlib="$dev/Platforms/iPhoneOS.platform/Developer/usr/lib/lib_TestingInterop.dylib"
+            printf 'sim  dylib: '; [ -e "$simlib" ] && echo "PRESENT $simlib" || echo "MISSING"
+            printf 'dev  dylib: '; [ -e "$devlib" ] && echo "PRESENT $devlib" || echo "MISSING"
+            printf 'sdk       : '; ls "$dev/Platforms/iPhoneSimulator.platform/Developer/SDKs" 2>/dev/null | tr '\n' ' '; echo
+          done
+
+      - name: Any copy of the dylib on the machine
+        run: |
+          set -uo pipefail
+          echo "=== mdfind (may be empty if Spotlight is off) ==="
+          mdfind -name lib_TestingInterop.dylib 2>/dev/null | head -10 || true
+          echo "=== targeted find under /Applications/Xcode*.app (bounded) ==="
+          for XC in /Applications/Xcode*.app; do
+            [ -d "$XC" ] || continue
+            find "$XC/Contents/Developer/Platforms" -maxdepth 7 -name "lib_TestingInterop*" 2>/dev/null | head -5
+          done
+          echo "=== simulator runtimes installed ==="
+          xcrun simctl list runtimes
+
+      - name: Note in the summary
+        run: |
+          {
+            echo "### Xcode inventory"
+            echo '```'
+            ls -d /Applications/Xcode*.app 2>/dev/null || echo none
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
