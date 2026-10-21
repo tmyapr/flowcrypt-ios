@@ -148,12 +148,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$OUT" /tmp/mock_mail
-          nohup python3 poc/mock_mail/imap_server.py --port 143 --log /tmp/mock_mail/imap.log > "$OUT/mock-imap.stdout" 2>&1 &
+          nohup python3 poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log > "$OUT/mock-imap.stdout" 2>&1 &
           nohup python3 poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log > "$OUT/mock-smtp.stdout" 2>&1 &
           sleep 2
           python3 - <<'PY'
           import socket
-          for port in (143, 2525):
+          for port in (1143, 2525):
               s = socket.create_connection(("127.0.0.1", port), 5)
               print(port, s.recv(200))
               s.close()
@@ -196,6 +196,8 @@ jobs:
             --out "$OUT" \
             --email "$POC_EMAIL" \
             --password "$POC_PASSWORD" \
+            --imap-port 1143 \
+            --smtp-port 2525 \
             --bundle-id "$BID" || echo "appium driver exited non-zero (see artifacts)"
 
           xcrun simctl io "$UDID" screenshot "$OUT/shot-final-old.png" || true
