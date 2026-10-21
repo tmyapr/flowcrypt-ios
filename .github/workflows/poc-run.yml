@@ -1,0 +1,213 @@
+name: poc-run
+
+# Stage 2 of the FlowCrypt IMAP-logging PoC: takes the two .app bundles built by
+# poc-build and runs the simulator part (mock mail servers, Appium-driven IMAP
+# sign-in, screen recording, in-place upgrade, console capture).
+#
+# Re-running this alone takes ~8 minutes, so Appium/selector fixes do not
+# require a 40-minute rebuild.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'run id of a successful poc-build run (holds artifact poc-apps)'
+        required: true
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+
+env:
+  POC_EMAIL: poc@mockmail.test
+  POC_PASSWORD: 'PocPassw0rd!'
+  OUT: ${{ github.workspace }}/poc-out
+
+jobs:
+  run:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Download built apps
+        uses: actions/download-artifact@v4
+        with:
+          name: poc-apps
+          run-id: ${{ github.event.inputs.build_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/apps
+
+      - name: Unpack apps
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/apps"
+          ls -la
+          mkdir -p old new
+          ditto -x -k old.app.zip old
+          ditto -x -k new.app.zip new
+          find . -maxdepth 2 -name "*.app" -print
+          plutil -extract CFBundleIdentifier raw old/FlowCrypt.app/Info.plist
+          plutil -extract CFBundleIdentifier raw new/FlowCrypt.app/Info.plist
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          PICKED=""
+          for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
+          done
+          [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          xcodebuild -version
+
+      - name: Install Appium + xcuitest driver
+        run: |
+          set -euo pipefail
+          npm install -g appium@latest
+          appium --version
+          appium driver install xcuitest || appium driver install xcuitest@9 || true
+          appium driver list --installed || true
+          ( cd poc/appium && npm install )
+
+      - name: Boot simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          for rt,devs in d.items():
+              for dev in devs:
+                  if "iPhone" in dev["name"] and dev.get("isAvailable"):
+                      print(dev["udid"]); raise SystemExit
+          raise SystemExit("no iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl erase "$UDID" || true
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl list devices booted
+
+      - name: Start mock IMAP/SMTP servers
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT" /tmp/mock_mail
+          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log > "$OUT/mock-imap.stdout" 2>&1 &
+          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log > "$OUT/mock-smtp.stdout" 2>&1 &
+          if ! python3 poc/scripts/wait_ports.py 1143 2525 --timeout=45; then
+            cat "$OUT"/mock-imap.stdout "$OUT"/mock-smtp.stdout || true
+            exit 1
+          fi
+          python3 poc/scripts/assert_mail_flow.py 1143 2525 || {
+            cat "$OUT"/mock-imap.stdout "$OUT"/mock-smtp.stdout || true
+            exit 1
+          }
+
+      - name: Start Appium server
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          nohup appium --port 4723 --log-level info > "$OUT/appium-server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:4723/status > /dev/null; then echo "appium up"; break; fi
+            sleep 2
+          done
+          curl -s http://127.0.0.1:4723/status
+
+      - name: Install old app and verify it reaches the sign-in screen
+        id: sanity
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          BID=$(plutil -extract CFBundleIdentifier raw "$RUNNER_TEMP/apps/old/FlowCrypt.app/Info.plist")
+          echo "$BID" > "$OUT/bundle-id.txt"
+          xcrun simctl install "$UDID" "$RUNNER_TEMP/apps/old/FlowCrypt.app"
+          xcrun simctl launch "$UDID" "$BID" || true
+          sleep 12
+          xcrun simctl io "$UDID" screenshot "$OUT/shot-sanity-old.png" || true
+          xcrun simctl terminate "$UDID" "$BID" || true
+
+      - name: Drive IMAP sign-in with Appium (recorded)
+        id: drive
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          BID=$(cat "$OUT/bundle-id.txt")
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force "$OUT/demo-1-login.mp4" &
+          VID=$!
+          sleep 3
+          xcrun simctl launch --console-pty "$UDID" "$BID" 2>&1 | python3 poc/scripts/stamp.py > "$OUT/console-old-login.log" &
+          CONSOLE=$!
+          sleep 10
+          node poc/appium/poc_login.js \
+            --udid "$UDID" \
+            --out "$OUT" \
+            --email "$POC_EMAIL" \
+            --password "$POC_PASSWORD" \
+            --imap-port 1143 --smtp-port 2525 \
+            --bundle-id "$BID" || echo "appium driver exited non-zero"
+          xcrun simctl io "$UDID" screenshot "$OUT/shot-after-drive.png" || true
+          kill -INT $VID 2>/dev/null; sleep 3; kill $CONSOLE 2>/dev/null
+          xcrun simctl terminate "$UDID" "$BID" || true
+          tail -30 "$OUT/appium-server.log" || true
+
+      - name: Cold-start capture on the old build
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          BID=$(cat "$OUT/bundle-id.txt")
+          xcrun simctl launch --console-pty "$UDID" "$BID" 2>&1 | python3 poc/scripts/stamp.py > "$OUT/console-old-relaunch.log" &
+          sleep 45
+          xcrun simctl io "$UDID" screenshot "$OUT/shot-old-relaunch.png" || true
+          pkill -f "simctl launch --console-pty" || true
+          xcrun simctl terminate "$UDID" "$BID" || true
+
+      - name: Upgrade in place to the build without IMAP sign-in
+        id: upgrade
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          BID=$(cat "$OUT/bundle-id.txt")
+          NEWBID=$(plutil -extract CFBundleIdentifier raw "$RUNNER_TEMP/apps/new/FlowCrypt.app/Info.plist")
+          [ "$BID" = "$NEWBID" ] || { echo "bundle id mismatch: $BID vs $NEWBID"; exit 1; }
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force "$OUT/demo-2-upgrade.mp4" &
+          VID=$!
+          sleep 3
+          xcrun simctl install "$UDID" "$RUNNER_TEMP/apps/new/FlowCrypt.app"
+          xcrun simctl launch --console-pty "$UDID" "$BID" 2>&1 | python3 poc/scripts/stamp.py > "$OUT/console-new-after-upgrade.log" &
+          sleep 45
+          xcrun simctl io "$UDID" screenshot "$OUT/shot-final-new.png" || true
+          kill -INT $VID 2>/dev/null; sleep 3
+          pkill -f "simctl launch --console-pty" || true
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          set -uo pipefail
+          cp /tmp/mock_mail/*.log "$OUT/" 2>/dev/null || true
+          {
+            echo "build_run_id=${{ github.event.inputs.build_run_id }}"
+            echo "bundle_id=$(cat "$OUT/bundle-id.txt" 2>/dev/null)"
+            echo
+            echo "== app console: old build, during sign-in =="
+            grep -iE "LOGIN|AUTH|mailcore|IMAP" "$OUT/console-old-login.log" 2>/dev/null | head -15
+            echo
+            echo "== app console: old build, cold start =="
+            grep -iE "LOGIN|AUTH|mailcore|IMAP" "$OUT/console-old-relaunch.log" 2>/dev/null | head -15
+            echo
+            echo "== app console: new build after upgrade =="
+            grep -iE "LOGIN|AUTH|mailcore|IMAP" "$OUT/console-new-after-upgrade.log" 2>/dev/null | head -15
+          } > "$OUT/SUMMARY.txt" 2>&1 || true
+          grep -H "LOGIN\|auth_password\|auth_plain" "$OUT"/imap.log "$OUT"/smtp.log > "$OUT/credentials-proof.txt" 2>/dev/null || true
+          ls -la "$OUT"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poc-evidence
+          path: ${{ github.workspace }}/poc-out
+          retention-days: 7

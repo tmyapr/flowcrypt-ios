@@ -1,0 +1,115 @@
+name: poc-build
+
+# Stage 1 of the FlowCrypt IMAP-logging PoC: build both legs from unmodified
+# upstream source and keep the .app bundles as artifacts, so the simulator leg
+# (stage 2, poc-run) can be re-run in ~8 minutes instead of ~40.
+
+on:
+  workflow_dispatch:
+    inputs:
+      old_sha:
+        description: 'commit with IMAP sign-in UI'
+        default: '60d33709f4dbc72862e09f2bb77120717e6e9fc7'
+      new_sha:
+        description: 'commit that hides IMAP sign-in'
+        default: '842645b207296bbd852f7ad1b4ea6ba3881d2d10'
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+
+env:
+  UPSTREAM: https://github.com/FlowCrypt/flowcrypt-ios.git
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Fetch both commits
+        run: |
+          set -euo pipefail
+          OLD="${{ github.event.inputs.old_sha || '60d33709f4dbc72862e09f2bb77120717e6e9fc7' }}"
+          NEW="${{ github.event.inputs.new_sha || '842645b207296bbd852f7ad1b4ea6ba3881d2d10' }}"
+          mkdir -p "$RUNNER_TEMP/src"
+          git clone --filter=blob:none "$UPSTREAM" "$RUNNER_TEMP/src/repo"
+          cd "$RUNNER_TEMP/src/repo"
+          git fetch origin "$OLD" --depth 1 || git fetch origin "$OLD"
+          git fetch origin "$NEW" --depth 1 || git fetch origin "$NEW"
+          git worktree add "$RUNNER_TEMP/src/old" "$OLD"
+          git worktree add "$RUNNER_TEMP/src/new" "$NEW"
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          PICKED=""
+          for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
+          done
+          [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          xcodebuild -version
+
+      - name: Rewrite SSH submodule URLs
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install CocoaPods
+        run: |
+          set -euo pipefail
+          sudo gem install cocoapods -v 1.11.3 --no-document || sudo gem install cocoapods --no-document
+          pod --version
+
+      - name: pod install (both legs)
+        run: |
+          set -euo pipefail
+          for leg in old new; do
+            cd "$RUNNER_TEMP/src/$leg"
+            pod install --repo-update || pod install
+          done
+
+      - name: Build old app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          cd "$RUNNER_TEMP/src/old"
+          xcodebuild -workspace FlowCrypt.xcworkspace -scheme "Debug FlowCrypt" \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd_old" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build 2>&1 | tee "$RUNNER_TEMP/out/xcodebuild-old.log" | tail -40
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/dd_old/Build/Products/Debug-iphonesimulator/FlowCrypt.app" \
+            "$RUNNER_TEMP/out/old.app.zip"
+
+      - name: Build new app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          cd "$RUNNER_TEMP/src/new"
+          xcodebuild -workspace FlowCrypt.xcworkspace -scheme "Debug FlowCrypt" \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd_new" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build 2>&1 | tee "$RUNNER_TEMP/out/xcodebuild-new.log" | tail -40
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/dd_new/Build/Products/Debug-iphonesimulator/FlowCrypt.app" \
+            "$RUNNER_TEMP/out/new.app.zip"
+
+      - name: Report bundle ids
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dd_old/Build/Products/Debug-iphonesimulator/FlowCrypt.app"
+          echo "old: $(plutil -extract CFBundleIdentifier raw Info.plist)"
+          cd "$RUNNER_TEMP/dd_new/Build/Products/Debug-iphonesimulator/FlowCrypt.app"
+          echo "new: $(plutil -extract CFBundleIdentifier raw Info.plist)"
+
+      - name: Upload app bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: poc-apps
+          path: ${{ runner.temp }}/out/*.zip
+          retention-days: 7

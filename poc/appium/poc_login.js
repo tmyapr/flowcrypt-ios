@@ -133,6 +133,7 @@ const step = async (driver, name, fn) => {
       'appium:bundleId': BUNDLE_ID,
       // attach to the process we already launched with `simctl --console-pty`
       // so that its stdout (the leaked credential lines) keeps flowing
+      'appium:showXcodeLog': true,
       'appium:forceAppLaunch': false,
       'appium:shouldTerminateApp': false,
       'appium:noReset': true,
