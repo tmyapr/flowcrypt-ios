@@ -1,0 +1,203 @@
+name: poc-gui
+
+# Stage 2 of the FlowCrypt IMAP-logging PoC, GUI edition.
+#
+# Appium/WDA is unusable on this runner image (every Xcode lacks
+# lib_TestingInterop.dylib, see wda-matrix), but gui-probe proved that
+# cliclick + System Events can drive the Simulator window directly on the
+# hosted display. This workflow does the same job without XCTest:
+#
+#   mock IMAP/SMTP -> install old build -> launch with console capture ->
+#   click/type through the IMAP sign-in -> record -> upgrade in place ->
+#   capture again
+#
+# With `actions` empty it only stages everything and takes calibration
+# screenshots (desktop + device), which is what the coordinate table is built
+# from.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'poc-build run id holding the poc-apps artifact'
+        required: true
+      actions:
+        description: 'path to a JSON action file (empty = calibration only)'
+        default: ''
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+
+env:
+  POC_EMAIL: poc@mockmail.test
+  POC_PASSWORD: 'PocPassw0rd!'
+  OUT: ${{ github.workspace }}/poc-out
+
+jobs:
+  gui:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Download built apps
+        uses: actions/download-artifact@v4
+        with:
+          name: poc-apps
+          run-id: ${{ github.event.inputs.build_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/apps
+
+      - name: Unpack apps
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/apps"
+          ls -la
+          mkdir -p old new
+          ditto -x -k old.app.zip old
+          ditto -x -k new.app.zip new
+          find . -maxdepth 2 -name "*.app" -print
+          plutil -extract CFBundleIdentifier raw old/FlowCrypt.app/Info.plist
+          plutil -extract CFBundleIdentifier raw new/FlowCrypt.app/Info.plist
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          PICKED=""
+          for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
+          done
+          [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          xcodebuild -version
+
+      - name: Boot simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          for rt,devs in d.items():
+              for dev in devs:
+                  if "iPhone" in dev["name"] and dev.get("isAvailable"):
+                      print(dev["udid"]); raise SystemExit
+          raise SystemExit("no iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl erase "$UDID" || true
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          echo "device line: $(xcrun simctl list devices | grep "$UDID")"
+          # Device pixel size, needed later to map clicks (pixels -> points).
+          xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/device-probe.png" || true
+          sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP/device-probe.png" 2>/dev/null || true
+
+      - name: Open Simulator.app and normalise the window
+        id: win
+        run: |
+          set -euo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          open -a Simulator --args -CurrentDeviceUDID "$UDID"
+          sleep 20
+          osascript -e 'tell application "Simulator" to activate' || true
+          # Put the window somewhere deterministic so the coordinate table is
+          # reproducible between runs.
+          osascript -e 'tell application "System Events" to tell process "Simulator" to set position of window 1 to {80, 40}' || true
+          # Window > Point Accurate: 1 device point == 1 screen point.
+          osascript -e 'tell application "System Events" to keystroke "2" using command down' || true
+          sleep 3
+          echo "--- window rect (x, y, w, h) ---"
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1'
+          echo "--- cliclick sanity ---"
+          cliclick m:200,300 && echo "cliclick OK"
+
+      - name: Trust the mock mail CA
+        run: |
+          set -euo pipefail
+          bash poc/scripts/make_certs.sh "$OUT/certs"
+          UDID='${{ steps.sim.outputs.udid }}'
+          xcrun simctl keychain "$UDID" add-root-cert "$OUT/certs/ca.pem"
+          echo "root CA installed"
+
+      - name: Start mock IMAP/SMTP servers
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT" /tmp/mock_mail
+          TLS=(--cert "$OUT/certs/server-chain.pem" --key "$OUT/certs/server.key")
+          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
+          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
+          python3 poc/scripts/wait_ports.py 1143 2525 --timeout=45
+
+      - name: Install and launch old build with console capture
+        id: launch
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          BID=$(plutil -extract CFBundleIdentifier raw "$RUNNER_TEMP/apps/old/FlowCrypt.app/Info.plist")
+          echo "BID=$BID" >> "$GITHUB_ENV"
+          xcrun simctl install "$UDID" "$RUNNER_TEMP/apps/old/FlowCrypt.app"
+          nohup bash -c "xcrun simctl launch --console-pty '$UDID' '$BID' 2>&1 | python3 poc/scripts/stamp.py > '$OUT/console-old-login.log'" > /dev/null 2>&1 &
+          sleep 12
+          echo "--- app console so far ---"
+          tail -20 "$OUT/console-old-login.log" || true
+
+      - name: Calibration screenshots
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          osascript -e 'tell application "Simulator" to activate'
+          sleep 1
+          screencapture -x "$OUT/calib-desktop.png"
+          xcrun simctl io "$UDID" screenshot "$OUT/calib-device.png"
+          echo "--- sizes ---"
+          sips -g pixelWidth -g pixelHeight "$OUT/calib-desktop.png" | tail -2
+          sips -g pixelWidth -g pixelHeight "$OUT/calib-device.png" | tail -2
+          echo "--- window rect ---"
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1'
+
+      - name: Run action script
+        if: ${{ github.event.inputs.actions != '' }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          DW=$(sips -g pixelWidth "$OUT/calib-device.png" | tail -1 | awk '{print $2}')
+          DH=$(sips -g pixelHeight "$OUT/calib-device.png" | tail -1 | awk '{print $2}')
+          # Device pixels -> points (3x for modern iPhones).
+          PW=$(( DW / 3 ))
+          PH=$(( DH / 3 ))
+          echo "device points: ${PW}x${PH}"
+          python3 poc/scripts/gui_drive.py \
+            --actions '${{ github.event.inputs.actions }}' \
+            --out "$OUT" --device-width "$PW" --device-height "$PH" \
+            --map "$OUT/gui-mapping.json" || echo "driver exited non-zero"
+          xcrun simctl io "$UDID" screenshot "$OUT/after-actions-device.png" || true
+          screencapture -x "$OUT/after-actions-desktop.png" || true
+          echo "--- imap.log ---"; cat /tmp/mock_mail/imap.log || true
+          echo "--- console grep ---"; grep -aiE "LOGIN|mailcore|IMAP" "$OUT/console-old-login.log" | head -10 || true
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          set -uo pipefail
+          cp /tmp/mock_mail/*.log "$OUT/" 2>/dev/null || true
+          {
+            echo "build_run_id=${{ github.event.inputs.build_run_id }}"
+            echo "bundle_id=${BID:-unknown}"
+            echo
+            echo "== app console (old build) =="
+            tail -40 "$OUT/console-old-login.log" 2>/dev/null || true
+            echo
+            echo "== imap.log =="
+            cat /tmp/mock_mail/imap.log 2>/dev/null || true
+            echo
+            echo "== smtp.log =="
+            cat /tmp/mock_mail/smtp.log 2>/dev/null || true
+          } | tee "$OUT/SUMMARY.txt"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poc-gui-${{ github.run_id }}
+          path: poc-out
