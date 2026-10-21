@@ -67,6 +67,17 @@ jobs:
           xcodebuild -version
           xcrun simctl list runtimes | head -20
 
+      - name: Neutralize SSH submodule URLs (mailcore2 -> libetpan)
+        # FlowCrypt/mailcore2 declares its libetpan submodule as
+        # git@github.com:Marketcircle/libetpan, which cannot be cloned without an
+        # SSH key on the runner. Rewriting to HTTPS is an environment-only fix:
+        # no application source is touched.
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --get-regexp 'url\..*insteadof'
+
       - name: Install build tooling (CocoaPods, Appium, webdriverio)
         run: |
           set -euo pipefail
