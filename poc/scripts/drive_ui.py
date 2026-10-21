@@ -116,9 +116,16 @@ def device_rect():
 
     crows, ccols = row_profile(crop), col_profile(crop)
     best = None
-    # Point Accurate gives scale 1; the rest are there for when the menu item is
-    # unavailable and Simulator picked its own zoom.
-    for scale in (1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65):
+    # With "Point Accurate" the window is the device plus a bezel, so the scale
+    # is exactly 1 and the two margins are small. Only fall back to a scale
+    # search when the window geometry says otherwise -- a blind search happily
+    # picks a shrunken template and every tap then lands in the wrong place.
+    gw, gh = w - DEVICE_POINTS[0], h - DEVICE_POINTS[1]
+    if 0 <= gw <= 140 and 20 <= gh <= 260:
+        scales = (1.0,)
+    else:
+        scales = (1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65)
+    for scale in scales:
         tw, th = int(round(dev.size[0] * scale)), int(round(dev.size[1] * scale))
         if tw >= cw or th >= ch or tw < 100:
             continue
@@ -151,6 +158,24 @@ def device_rect():
         "screen": {"x": x + dx, "y": y + dy, "w": tw, "h": th},
         "calibration": {"scale": scale, "score": round(score, 2)},
     }
+
+
+def device_shot(path):
+    run(["xcrun", "simctl", "io", "booted", "screenshot", path], check=True)
+    return path
+
+
+def changed(a, b):
+    """Mean absolute difference between two device screenshots (0..255)."""
+    from PIL import Image, ImageChops
+    ia = Image.open(a).convert("L").resize((120, 260))
+    ib = Image.open(b).convert("L").resize((120, 260))
+    diff = ImageChops.difference(ia, ib)
+    hist = diff.histogram()
+    total = sum(i * n for i, n in enumerate(hist))
+    mean = total / float(120 * 260)
+    print(f"screen diff {mean:.2f} between {os.path.basename(a)} and {os.path.basename(b)}")
+    return mean
 
 
 def to_screen(dx, dy, geo):
@@ -290,6 +315,10 @@ def main():
         swipe(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]))
     elif cmd == "shot":
         shot(sys.argv[2])
+    elif cmd == "devshot":
+        device_shot(sys.argv[2])
+    elif cmd == "diff":
+        changed(sys.argv[2], sys.argv[3])
     elif cmd == "dialogs":
         print(list_dialogs())
     elif cmd == "dismiss":

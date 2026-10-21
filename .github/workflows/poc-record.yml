@@ -167,6 +167,7 @@ jobs:
           sleep 3
           $D shot "$OUT/explore/01-after-other.png"
           xcrun simctl io '${{ steps.sim.outputs.udid }}' screenshot "$OUT/explore/01-device.png"
+          $D diff "$OUT/explore/00-device.png" "$OUT/explore/01-device.png"
           echo "--- dialog inventory after first tap ---"
           $D dialogs
           # if the tap was swallowed, try once more after clearing any prompt
@@ -175,6 +176,7 @@ jobs:
           sleep 3
           $D shot "$OUT/explore/01b-after-other-retry.png"
           xcrun simctl io '${{ steps.sim.outputs.udid }}' screenshot "$OUT/explore/01b-device.png"
+          $D diff "$OUT/explore/00-device.png" "$OUT/explore/01b-device.png"
           for i in 2 3 4 5; do
             $D swipe 201 720 201 260
             sleep 2
