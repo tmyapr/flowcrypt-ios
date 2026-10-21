@@ -72,8 +72,10 @@ jobs:
           set -euo pipefail
           sudo gem install cocoapods -v 1.11.3 --no-document || sudo gem install cocoapods --no-document
           pod --version
-          npm install -g appium@2
-          appium driver install xcuitest
+          npm install -g appium@latest
+          appium --version
+          appium driver install xcuitest || appium driver install xcuitest@9 || true
+          appium driver list --installed || true
           ( cd poc/appium && npm install )
 
       - name: pod install (both legs)
