@@ -249,7 +249,10 @@ jobs:
           xcrun simctl io "$UDID" recordVideo --codec=h264 --force "$OUT/demo-1-login.mp4" &
           VID=$!
           sleep 3
-          xcrun simctl launch --console-pty "$UDID" "$BID" 2>&1 \
+          # --terminate-running-process matters: relaunching an app that is
+          # already running returns immediately and the console stays empty,
+          # which is exactly the log line this PoC needs.
+          xcrun simctl launch --console-pty --terminate-running-process "$UDID" "$BID" 2>&1 \
             | python3 poc/scripts/stamp.py > "$OUT/console-old-login.log" &
           CONSOLE=$!
           sleep 14
