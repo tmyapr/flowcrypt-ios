@@ -184,6 +184,58 @@ jobs:
             xcrun simctl io '${{ steps.sim.outputs.udid }}' screenshot "$OUT/explore/0$i-device.png"
           done
 
+      # Diagnostic phase: find out whether the app stops handling touches after
+      # the email is entered (a main-thread hang) or whether the clicks never
+      # arrive. Each scenario ends by tapping the back arrow: if the app is
+      # alive that always changes the screen.
+      - name: Probe touch handling
+        if: github.event.inputs.phase == 'probe'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          BID=$(cat "$OUT/bundle-id.txt")
+          D="python3 poc/scripts/drive_ui.py"
+          E="$OUT/probe"; mkdir -p "$E"
+
+          restart() {
+            xcrun simctl terminate "$UDID" "$BID" >/dev/null 2>&1 || true
+            sleep 2
+            xcrun simctl launch "$UDID" "$BID" >/dev/null
+            sleep 10
+            $D dismiss >/dev/null 2>&1 || true
+            $D focus
+          }
+          pid_of() { pgrep -f 'FlowCrypt.app/FlowCrypt' | head -1; }
+
+          echo "=== S1: password field first, before any email is typed ==="
+          restart
+          $D tapnav 201 630
+          $D devshot "$E/s1-00-form.png"
+          $D tapnav 201 293 0.2
+          $D devshot "$E/s1-01-password.png"
+          $D tapnav 30 95
+          $D devshot "$E/s1-02-back.png"
+
+          echo "=== S2: email first, then the password field ==="
+          restart
+          $D tapnav 201 630
+          $D field 201 181 "$POC_EMAIL"
+          $D devshot "$E/s2-01-email.png"
+          sleep 5
+          $D tapnav 201 293 0.2
+          $D devshot "$E/s2-02-password.png"
+          $D tapnav 30 95
+          $D devshot "$E/s2-03-back.png"
+
+          echo "=== S3: is the app process still alive, and where is its main thread? ==="
+          P=$(pid_of); echo "pid=$P"
+          if [ -n "$P" ]; then
+            ps -o pid,stat,%cpu,etime,command -p "$P" | tail -2
+            sample "$P" 3 -file "$E/main-thread-sample.txt" >/dev/null 2>&1 || true
+            sed -n '/Thread_.*DispatchQueue_1/,/^$/p' "$E/main-thread-sample.txt" | head -45 || true
+          fi
+
       - name: Record the IMAP sign-in
         if: github.event.inputs.phase == 'login'
         continue-on-error: true

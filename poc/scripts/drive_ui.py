@@ -236,10 +236,35 @@ def to_screen(dx, dy, geo):
 
 
 def geom():
+    """Device rectangle on the desktop, cached for the life of the run.
+
+    Measuring it costs a pair of screenshots plus an AppleScript round trip, and
+    that round trip can take minutes while the simulated app is busy -- long
+    enough that a sequence of taps looks like it hangs. The window does not move
+    during a run, so measure once and reuse; tap_nav forces a refresh whenever a
+    tap fails to change the screen, which is exactly when the cache could be
+    stale.
+    """
+    cache = os.path.join(TMP, "geom.json")
+    if not os.environ.get("GEOM_REFRESH") and os.path.exists(cache):
+        age = time.time() - os.path.getmtime(cache)
+        if age < 3600:
+            with open(cache) as fh:
+                geo = json.load(fh)
+            print(json.dumps(geo) + f" (cached {int(age)}s)")
+            return geo
     geo = device_rect()
     geo["device_w"], geo["device_h"] = DEVICE_POINTS
+    with open(cache, "w") as fh:
+        json.dump(geo, fh)
     print(json.dumps(geo))
     return geo
+
+
+def clear_geom():
+    p = os.path.join(TMP, "geom.json")
+    if os.path.exists(p):
+        os.remove(p)
 
 
 def click_at(dx, dy):
@@ -274,6 +299,7 @@ def tap_nav(dx, dy, tries=4, min_diff=1.0):
         if d >= min_diff:
             return True
         print("  screen did not change -- retrying the tap")
+        clear_geom()  # a moved window is one of the few ways this legitimately fails
     print(f"tapnav gave up at ({dx},{dy}): the screen never changed")
     return False
 
@@ -410,6 +436,9 @@ def main():
     elif cmd == "tapnav":
         md = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
         tap_nav(int(sys.argv[2]), int(sys.argv[3]), min_diff=md)
+    elif cmd == "cleargeom":
+        clear_geom()
+        print("geometry cache cleared")
     elif cmd == "field":
         type_into(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif cmd == "type":
