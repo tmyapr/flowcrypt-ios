@@ -1,12 +1,17 @@
 name: wda-probe
 
-# Fast diagnostic (no app build, ~4 min): can Appium build + launch
-# WebDriverAgent on a GitHub-hosted macOS runner?
+# Fast diagnostic (no app build, ~5 min): why can't WebDriverAgent start on a
+# GitHub-hosted macOS runner?
 #
-# If WDA cannot start, this prints the real xcodebuild error instead of the
-# generic "xcodebuild exited with code 65" we got inside the full PoC run.
-# Session target is MobileSafari.app (already in the simulator runtime), so no
-# FlowCrypt build is needed to answer the question.
+# Observed on macos-15-intel / Xcode 26.3:
+#   error: lstat(.../iPhoneSimulator.platform/Developer/usr/lib/lib_TestingInterop.dylib):
+#          No such file or directory  (in target 'WebDriverAgentRunner')
+#   ** TEST BUILD FAILED **
+#   Failed to get bundle ID from .../WebDriverAgentRunner-Runner.app
+#
+# This probe reports the exact Xcode/Appium/WDA versions, locates the dylib
+# anywhere inside the Xcode bundle, repairs the path with a symlink when it
+# exists, and then retries a real session against MobileSafari.app.
 
 on:
   workflow_dispatch:
@@ -21,7 +26,7 @@ on:
 jobs:
   probe:
     runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -33,18 +38,52 @@ jobs:
             [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
           done
           [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          echo "PICKED=$PICKED" >> "$GITHUB_ENV"
           xcodebuild -version
-          node --version
-          python3 -V
+          echo "--- runtimes ---"
+          xcrun simctl list runtimes
 
       - name: Install Appium + xcuitest driver
         run: |
           set -euo pipefail
           npm install -g appium@latest
-          appium --version
+          echo "appium: $(appium --version)"
           DV='${{ github.event.inputs.driver_version }}'
           if [ -n "$DV" ]; then appium driver install xcuitest@"$DV"; else appium driver install xcuitest; fi
-          appium driver list --installed
+          echo "--- installed driver ---"
+          appium driver list --installed 2>&1 | head -20
+          WDA_DIR="$HOME/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent"
+          echo "WDA_DIR=$WDA_DIR" >> "$GITHUB_ENV"
+          if [ -f "$WDA_DIR/package.json" ]; then
+            echo "appium-webdriveragent: $(python3 -c "import json;print(json.load(open('$WDA_DIR/package.json'))['version'])")"
+          fi
+          if [ -f "$HOME/.appium/node_modules/appium-xcuitest-driver/package.json" ]; then
+            echo "appium-xcuitest-driver: $(python3 -c "import json;print(json.load(open('$HOME/.appium/node_modules/appium-xcuitest-driver/package.json'))['version'])")"
+          fi
+
+      - name: Hunt for lib_TestingInterop.dylib inside the Xcode bundle
+        run: |
+          set -uo pipefail
+          XC="$(dirname "$(dirname "$(xcode-select -p)")")"
+          echo "Xcode bundle: $XC"
+          echo "--- expected path ---"
+          EXPECTED="$XC/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib/lib_TestingInterop.dylib"
+          ls -la "$EXPECTED" 2>&1 || echo "MISSING: $EXPECTED"
+          echo "--- where does it actually live? ---"
+          # Targeted, not a full-tree walk: only a handful of Developer/usr/lib dirs.
+          for d in \
+            "$XC/Contents/Developer/Platforms/iPhoneOS.platform/Developer/usr/lib" \
+            "$XC/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library" \
+            "$XC/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library/PrivateFrameworks" \
+            "$XC/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib" \
+            "$XC/Contents/Developer/usr/lib" ; do
+            [ -d "$d" ] && find "$d" -maxdepth 3 -name "lib_TestingInterop*" 2>/dev/null
+          done
+          echo "--- any copy under the two simulator/device platforms (shallow) ---"
+          find "$XC/Contents/Developer/Platforms/iPhoneSimulator.platform" -maxdepth 6 -name "lib_TestingInterop*" 2>/dev/null | head -5
+          find "$XC/Contents/Developer/Platforms/iPhoneOS.platform" -maxdepth 6 -name "lib_TestingInterop*" 2>/dev/null | head -5
+          echo "--- XCTest framework contents (sanity) ---"
+          ls "$XC/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks/XCTest.framework" 2>/dev/null | head
 
       - name: Boot simulator
         id: sim
@@ -61,45 +100,61 @@ jobs:
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
-          echo "runtime: $(xcrun simctl list devices | grep "$UDID")"
+          echo "device: $(xcrun simctl list devices | grep "$UDID")"
 
-      - name: Locate MobileSafari.app inside the runtime
-        id: safari
+      - name: Repair the dylib path if the file exists somewhere else
+        id: repair
         run: |
           set -uo pipefail
-          # Do not walk the whole Xcode tree: RuntimeRoot holds ~1M files and a
-          # recursive find takes 10+ minutes on a hosted runner. The runtime
-          # bundle path is O(1) from simctl.
-          ROOT=$(xcrun simctl list runtimes -j | python3 -c '
-          import json,sys
-          rts = [r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable")]
-          ios = [r for r in rts if r.get("platform") == "iOS"] or rts
-          print(ios[0].get("runtimeRoot") or (ios[0]["bundlePath"] + "/Contents/Resources/RuntimeRoot"))')
-          echo "runtimeRoot=$ROOT"
-          P="$ROOT/Applications/MobileSafari.app"
-          [ -d "$P" ] || P=$(ls -d "$ROOT"/Applications/*.app 2>/dev/null | head -1)
-          echo "found: $P"
-          [ -d "$P" ] || { echo "no usable system app"; exit 1; }
-          echo "app=$P" >> "$GITHUB_OUTPUT"
+          XC="$(dirname "$(dirname "$(xcode-select -p)")")"
+          LIBDIR="$XC/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib"
+          TARGET="$LIBDIR/lib_TestingInterop.dylib"
+          if [ -e "$TARGET" ]; then echo "already present"; exit 0; fi
+          SRC=$(find "$XC/Contents/Developer/Platforms/iPhoneSimulator.platform" -maxdepth 6 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
+          [ -n "$SRC" ] || SRC=$(find "$XC/Contents/Developer/Platforms/iPhoneOS.platform" -maxdepth 6 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
+          [ -n "$SRC" ] || SRC=$(find "$XC/Contents/Developer" -maxdepth 8 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
+          if [ -z "$SRC" ]; then
+            echo "REPAIR=impossible (file not found anywhere in Xcode)" >> "$GITHUB_OUTPUT"
+            echo "no copy of lib_TestingInterop.dylib anywhere in Xcode"
+            exit 0
+          fi
+          echo "found copy at: $SRC"
+          sudo mkdir -p "$LIBDIR"
+          sudo ln -sf "$SRC" "$TARGET"
+          ls -la "$TARGET"
+          echo "REPAIR=symlinked" >> "$GITHUB_OUTPUT"
 
-      - name: Start Appium
+      - name: Build WDA for testing the way Appium does
+        id: buildwda
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
           mkdir -p out
-          nohup appium --port 4723 --log-level debug > out/appium.log 2>&1 &
-          for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:4723/status >/dev/null && { echo up; break; }
-            sleep 2
-          done
-          curl -s http://127.0.0.1:4723/status; echo
+          cd "$WDA_DIR"
+          xcodebuild build-for-testing test-without-building \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination "id=$UDID" \
+            GCC_TREAT_WARNINGS_AS_ERRORS=0 \
+            COMPILER_INDEX_STORE_ENABLE=NO 2>&1 | tee /tmp/wda-build.log | tail -5
+          echo "--- errors only ---"
+          grep -E "error:|TEST BUILD FAILED|TEST BUILD SUCCEEDED" /tmp/wda-build.log | head -20
 
-      - name: Try to create a WDA session (this is the real test)
+      - name: Start Appium and try a real session
         id: session
         continue-on-error: true
         run: |
           set -uo pipefail
           UDID='${{ steps.sim.outputs.udid }}'
-          APP='${{ steps.safari.outputs.app }}'
+          ROOT=$(xcrun simctl list runtimes -j | python3 -c '
+          import json,sys
+          rts=[r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable")]
+          ios=[r for r in rts if r.get("platform")=="iOS"] or rts
+          print(ios[0].get("runtimeRoot") or (ios[0]["bundlePath"]+"/Contents/Resources/RuntimeRoot"))')
+          APP="$ROOT/Applications/MobileSafari.app"
+          nohup appium --port 4723 --log-level info > out/appium.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:4723/status >/dev/null && break; sleep 2; done
           cat > out/session.json <<JSON
           {"capabilities":{"alwaysMatch":{
             "platformName":"iOS",
@@ -108,43 +163,44 @@ jobs:
             "appium:deviceName":"iPhone",
             "appium:app":"$APP",
             "appium:noReset":true,
-            "appium:showXcodeLog":true,
+            "appium:showXcodeLog":false,
             "appium:wdaLaunchTimeout":420000,
             "appium:wdaConnectionTimeout":420000,
             "appium:newCommandTimeout":600
           }}}
           JSON
-          echo "--- request ---"; cat out/session.json
           curl -sS -X POST http://127.0.0.1:4723/session \
-            -H 'Content-Type: application/json' \
-            --max-time 900 --data @out/session.json | tee out/session-response.json
-          echo
+            -H 'Content-Type: application/json' --max-time 900 \
+            --data @out/session.json -o out/session-response.json -w 'http=%{http_code}\n' || echo "curl failed"
           python3 - <<'PY'
           import json
           try:
               r = json.load(open('out/session-response.json'))
           except Exception as e:
-              print('unparseable response:', e); raise SystemExit(0)
+              print('unparseable:', e, open('out/session-response.json').read()[:400]); raise SystemExit(0)
           v = r.get('value', {})
-          if r.get('status') == 0 or 'sessionId' in r:
-              print('WDA_OK sessionId=', r.get('sessionId') or v.get('sessionId'))
+          sid = r.get('sessionId') or (v.get('sessionId') if isinstance(v, dict) else None)
+          if sid:
+              print('WDA_OK sessionId=', sid)
           else:
-              print('WDA_FAIL', json.dumps(v)[:2000])
+              print('WDA_FAIL', json.dumps(v)[:1500])
           PY
 
-      - name: If WDA failed, surface the compiler error
+      - name: Summarise
         if: always()
         run: |
           set -uo pipefail
-          echo "===== appium.log (WDA build sections) ====="
-          grep -nE "xcodebuild|error:|BUILD FAILED|BUILD SUCCEEDED|WebDriverAgent|Signing|code 65" out/appium.log | tail -80 || true
-          echo
-          echo "===== last 120 lines ====="
-          tail -120 out/appium.log || true
+          echo "repair: ${{ steps.repair.outputs.REPAIR }}"
+          echo "--- wda build errors ---"
+          grep -E "error:|TEST BUILD FAILED|TEST BUILD SUCCEEDED" /tmp/wda-build.log 2>/dev/null | head -10 || true
+          echo "--- appium: first real failure ---"
+          grep -nE "error:|ECONNREFUSED 127.0.0.1:8100|Failed to get bundle ID|WDA is not listening|Unable to launch" out/appium.log 2>/dev/null | head -12 || true
 
       - name: Upload probe log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wda-probe-${{ github.run_id }}
-          path: out
+          path: |
+            out
+            /tmp/wda-build.log
