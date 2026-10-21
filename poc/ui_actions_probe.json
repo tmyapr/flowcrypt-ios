@@ -1,0 +1,8 @@
+[
+  {"do": "click", "x": 201, "y": 647, "wait": 3.0},
+  {"do": "shot", "name": "form-open"},
+  {"do": "cmdkey", "char": "k", "wait": 1.5},
+  {"do": "shot", "name": "form-nokbd"},
+  {"do": "click", "x": 201, "y": 181, "wait": 1.5},
+  {"do": "shot", "name": "after-email-click"}
+]

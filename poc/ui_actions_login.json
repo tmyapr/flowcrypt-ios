@@ -1,0 +1,26 @@
+[
+  {"do": "click", "x": 201, "y": 647, "wait": 3.0},
+  {"do": "cmdkey", "char": "k", "wait": 1.5},
+  {"do": "shot", "name": "login-01-form"},
+
+  {"do": "click", "x": 201, "y": 195, "wait": 1.0},
+  {"do": "type", "text": "poc@mockmail.test", "wait": 2.5},
+  {"do": "shot", "name": "login-02-email"},
+
+  {"do": "clickrow", "row": 4, "wait": 1.0},
+  {"do": "type", "text": "PocPassw0rd!", "wait": 1.0},
+  {"do": "shot", "name": "login-03-password"},
+
+  {"do": "clickrow", "row": 7, "wait": 1.0},
+  {"do": "type", "text": "993", "wait": 1.0},
+  {"do": "shot", "name": "login-04-imap-port"},
+
+  {"do": "clickrow", "row": 11, "wait": 1.0},
+  {"do": "type", "text": "465", "wait": 1.0},
+  {"do": "shot", "name": "login-05-smtp-port"},
+
+  {"do": "clickgreen", "wait": 3.0},
+  {"do": "shot", "name": "login-06-after-connect"},
+  {"do": "sleep", "seconds": 12},
+  {"do": "shot", "name": "login-07-result"}
+]

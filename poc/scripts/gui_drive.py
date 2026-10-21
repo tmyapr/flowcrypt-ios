@@ -129,6 +129,58 @@ def measure_mapping(device_w, device_h, save_dir="."):
             "origin": {"x": x + best_x, "y": y + best_y}}
 
 
+def device_shot(path):
+    run(["xcrun", "simctl", "io", "booted", "screenshot", path])
+    return path
+
+
+def detect_rows(path, device_h=874, thr=215, lo=110, hi=800, min_dark=6):
+    """Vertical centres (device points) of the text rows in a form screenshot.
+
+    The setup table does not open at a fixed scroll offset, so row positions must
+    be measured instead of hardcoded. Once the fields contain values every row
+    draws dark text and the list is stable: 1 Account info, 2 Email, 3 Username,
+    4 Password, 5 Incoming, 6 IMAP server, 7 IMAP port, 8 Security, 9 Outgoing,
+    10 SMTP server, 11 SMTP port, 12 Security.
+    """
+    from PIL import Image
+
+    im = Image.open(path).convert("L")
+    w, h = im.size
+    px = im.load()
+    scale = h / float(device_h)
+    out, start = [], None
+    for yy in range(int(lo * scale), min(h, int(hi * scale))):
+        dark = sum(1 for xx in range(0, w, 2) if px[xx, yy] < thr)
+        if dark >= min_dark and start is None:
+            start = yy
+        elif dark < min_dark and start is not None:
+            if yy - start >= 5:
+                out.append(round((start + yy) / 2.0 / scale, 1))
+            start = None
+    return out
+
+
+def find_green(path, y_from=500, device_h=874):
+    """Centre (device points) of the big green primary button, or None."""
+    from PIL import Image
+
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    scale = h / float(device_h)
+    pts = []
+    for yy in range(int(y_from * scale), h, 2):
+        for xx in range(0, w, 2):
+            r, g, b = im.getpixel((xx, yy))
+            if g > 90 and g > r * 1.35 and g > b * 1.25:
+                pts.append((xx, yy))
+    if len(pts) < 500:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (round(sum(xs) / len(xs) / scale, 1), round(sum(ys) / len(ys) / scale, 1))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--actions", required=True)
@@ -176,6 +228,13 @@ def main():
                 osa(f'tell application "System Events" to key code {int(act["code"])}')
                 time.sleep(float(act.get("wait", 0.8)))
                 print(f"[{i}] keycode {act['code']}")
+            elif kind == "cmdkey":
+                # e.g. {"do":"cmdkey","char":"k"} toggles the software keyboard
+                focus_simulator()
+                ch = act["char"]
+                osa(f'tell application "System Events" to keystroke "{ch}" using command down')
+                time.sleep(float(act.get("wait", 1.0)))
+                print(f"[{i}] cmd+{ch}")
             elif kind == "swipe":
                 sx1, sy1 = to_screen(act["x"], act["y"])
                 sx2, sy2 = to_screen(act["x"], act["to_y"])
@@ -191,6 +250,31 @@ def main():
                 run(["cliclick", f"du:{sx2:.0f},{sy2:.0f}"])
                 time.sleep(float(act.get("wait", 1.2)))
                 print(f"[{i}] swipe device y{act['y']}->{act['to_y']}")
+            elif kind == "clickrow":
+                shot_path = device_shot(os.path.join(args.out, "rows.png"))
+                rows = detect_rows(shot_path, device_h=args.device_height)
+                n = int(act["row"])
+                print(f"[{i}] rows detected: {rows}")
+                if n < 1 or n > len(rows):
+                    raise RuntimeError(f"clickrow: no row {n} (only {len(rows)})")
+                dx, dy = 201, int(round(rows[n - 1]))
+                sx, sy = to_screen(dx, dy)
+                run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                time.sleep(0.2)
+                run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                time.sleep(float(act.get("wait", 1.0)))
+                print(f"[{i}] clickrow {n} device(201,{dy}) -> screen({sx:.0f},{sy:.0f})")
+            elif kind == "clickgreen":
+                shot_path = device_shot(os.path.join(args.out, "green.png"))
+                found = find_green(shot_path, device_h=args.device_height)
+                if not found:
+                    raise RuntimeError("clickgreen: no green button on screen")
+                sx, sy = to_screen(found[0], found[1])
+                run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                time.sleep(0.2)
+                run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                time.sleep(float(act.get("wait", 1.5)))
+                print(f"[{i}] clickgreen device({found[0]},{found[1]}) -> screen({sx:.0f},{sy:.0f})")
             elif kind == "sleep":
                 time.sleep(float(act["seconds"]))
                 print(f"[{i}] sleep {act['seconds']}s")
