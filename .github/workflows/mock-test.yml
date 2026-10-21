@@ -1,0 +1,61 @@
+name: mock-mail-selftest
+
+# Fast probe (no app build): validates that the plaintext mock IMAP/SMTP
+# servers can be started and reached on a GitHub macOS runner, and captures
+# firewall / listener state when they cannot.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+
+jobs:
+  probe:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner facts
+        run: |
+          sw_vers
+          python3 -VV
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate || true
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getblockall || true
+
+      - name: Start servers (same code path as the PoC) and probe
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/mock_mail out
+          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log > out/mock-imap.stdout 2>&1 &
+          echo $! > out/imap.pid
+          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log > out/mock-smtp.stdout 2>&1 &
+          echo $! > out/smtp.pid
+
+          python3 poc/scripts/wait_ports.py 1143 2525 --timeout=25 || true
+
+          echo "--- server processes ---"
+          ps -p "$(cat out/imap.pid),$(cat out/smtp.pid)" -o pid,stat,command || true
+          echo "--- listeners ---"
+          lsof -nP -iTCP:1143 -sTCP:LISTEN || echo "no listener on 1143"
+          lsof -nP -iTCP:2525 -sTCP:LISTEN || echo "no listener on 2525"
+          echo "--- stderr/stdout of servers ---"
+          cat out/mock-imap.stdout out/mock-smtp.stdout
+          echo "--- logs ---"
+          cat /tmp/mock_mail/*.log || true
+
+      - name: Assert a real IMAP/SMTP conversation works
+        run: |
+          set -euo pipefail
+          python3 poc/scripts/assert_mail_flow.py
+          echo "--- credentials recorded ---"
+          cat /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log
+
+      - name: Upload probe output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-selftest-${{ github.run_id }}
+          path: out
