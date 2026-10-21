@@ -31,9 +31,10 @@ env:
 
 jobs:
   poc:
-    # macos-13 ships Xcode 14/15 which is the closest match for 2022 Swift code.
-    # If this label is retired, switch to macos-14 and keep the Xcode picker below.
-    runs-on: macos-13
+    # macos-13/macos-14 are retired upstream; macos-15 is the oldest still
+    # hosted image. Only one Xcode major per image, so the picker below just
+    # takes whatever is installed (16.x here).
+    runs-on: macos-15
     timeout-minutes: 150
 
     steps:
@@ -57,12 +58,12 @@ jobs:
       - name: Select Xcode
         run: |
           set -euo pipefail
-          for v in 14.3.1 15.2 15.4 16.0 16.2; do
-            if [ -d "/Applications/Xcode_$v.app" ]; then
-              sudo xcode-select -s "/Applications/Xcode_$v.app"
-              break
-            fi
+          PICKED=""
+          for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            if [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ]; then PICKED="$app"; break; fi
           done
+          [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
           xcodebuild -version
           xcrun simctl list runtimes | head -20
 
@@ -86,12 +87,13 @@ jobs:
       - name: Build old app (IMAP sign-in available)
         run: |
           set -euo pipefail
+          mkdir -p "$OUT"
           cd "$RUNNER_TEMP/src/old"
           xcodebuild -workspace FlowCrypt.xcworkspace -scheme "Debug FlowCrypt" \
             -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/dd_old" \
-            CODE_SIGNING_ALLOWED=NO build | tail -60
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$OUT/xcodebuild-old.log" | tail -40
           mkdir -p "$RUNNER_TEMP/apps"
           cp -R "$RUNNER_TEMP/dd_old/Build/Products/Debug-iphonesimulator/FlowCrypt.app" "$RUNNER_TEMP/apps/old.app"
           plutil -extract CFBundleIdentifier raw "$RUNNER_TEMP/apps/old.app/Info.plist"
@@ -99,12 +101,13 @@ jobs:
       - name: Build new app (IMAP sign-in hidden, logger unchanged)
         run: |
           set -euo pipefail
+          mkdir -p "$OUT"
           cd "$RUNNER_TEMP/src/new"
           xcodebuild -workspace FlowCrypt.xcworkspace -scheme "Debug FlowCrypt" \
             -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/dd_new" \
-            CODE_SIGNING_ALLOWED=NO build | tail -60
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$OUT/xcodebuild-new.log" | tail -40
           cp -R "$RUNNER_TEMP/dd_new/Build/Products/Debug-iphonesimulator/FlowCrypt.app" "$RUNNER_TEMP/apps/new.app"
           plutil -extract CFBundleIdentifier raw "$RUNNER_TEMP/apps/new.app/Info.plist"
 
