@@ -165,6 +165,18 @@ jobs:
           echo "--- app console so far ---"
           tail -20 "$OUT/console-old-login.log" || true
 
+      - name: Start video recording
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          mkdir -p "$OUT"
+          # h264 + a fixed file name: this is the demo artifact of the report
+          nohup xcrun simctl io "$UDID" recordVideo --codec=h264 --force \
+            "$OUT/demo-1-login.mp4" > "$OUT/record-video.log" 2>&1 &
+          echo $! > "$OUT/vid.pid"
+          sleep 4
+          cat "$OUT/record-video.log" || true
+
       - name: Calibration screenshots
         run: |
           set -uo pipefail
@@ -200,6 +212,21 @@ jobs:
           echo "--- imap.log ---"; cat /tmp/mock_mail/imap.log || true
           echo "--- console grep ---"; grep -aiE "LOGIN|mailcore|IMAP" "$OUT/console-old-login.log" | head -10 || true
 
+      - name: Stop video recording
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -f "$OUT/vid.pid" ]; then
+            PID=$(cat "$OUT/vid.pid")
+            kill -INT "$PID" 2>/dev/null || true
+            for i in $(seq 1 20); do
+              kill -0 "$PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -9 "$PID" 2>/dev/null || true
+          fi
+          ls -la "$OUT"/*.mp4 2>/dev/null || echo "no video produced"
+
       - name: Collect evidence
         if: always()
         run: |
@@ -217,6 +244,12 @@ jobs:
             echo
             echo "== smtp.log =="
             cat /tmp/mock_mail/smtp.log 2>/dev/null || true
+            echo
+            echo "== PROOF: credential lines in the app console =="
+            grep -aiE "LOGIN |AUTH (LOGIN|PLAIN)|password" "$OUT/console-old-login.log" 2>/dev/null | head -20 || echo "(none yet)"
+            echo
+            echo "== PROOF: credentials seen by the mock servers =="
+            grep -aiE "LOGIN|auth_plain|auth_login" /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log 2>/dev/null | head -20 || echo "(none yet)"
           } | tee "$OUT/SUMMARY.txt"
 
       - name: Upload evidence
