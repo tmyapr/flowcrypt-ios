@@ -87,12 +87,24 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl list devices booted
 
+      - name: Trust the mock mail CA inside the simulator
+        # The app may open the IMAP/SMTP socket with implicit TLS (FlowCrypt's
+        # "Security type = none" only means "leave MailCore's default alone").
+        # Installing a per-run throwaway CA makes that path work too.
+        run: |
+          set -euo pipefail
+          bash poc/scripts/make_certs.sh "$OUT/certs"
+          UDID='${{ steps.sim.outputs.udid }}'
+          xcrun simctl keychain "$UDID" add-root-cert "$OUT/certs/ca.pem"
+          echo "root CA installed in $UDID"
+
       - name: Start mock IMAP/SMTP servers
         run: |
           set -euo pipefail
           mkdir -p "$OUT" /tmp/mock_mail
-          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log > "$OUT/mock-imap.stdout" 2>&1 &
-          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log > "$OUT/mock-smtp.stdout" 2>&1 &
+          TLS=(--cert "$OUT/certs/server-chain.pem" --key "$OUT/certs/server.key")
+          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
+          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
           if ! python3 poc/scripts/wait_ports.py 1143 2525 --timeout=45; then
             cat "$OUT"/mock-imap.stdout "$OUT"/mock-smtp.stdout || true
             exit 1

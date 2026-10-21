@@ -67,8 +67,19 @@ jobs:
         id: safari
         run: |
           set -uo pipefail
-          P=$(find /Applications/Xcode*.app/Contents/Developer -maxdepth 12 -name "MobileSafari.app" -type d 2>/dev/null | head -1)
-          echo "found: ${P:-<none>}"
+          # Do not walk the whole Xcode tree: RuntimeRoot holds ~1M files and a
+          # recursive find takes 10+ minutes on a hosted runner. The runtime
+          # bundle path is O(1) from simctl.
+          ROOT=$(xcrun simctl list runtimes -j | python3 -c '
+          import json,sys
+          rts = [r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable")]
+          ios = [r for r in rts if r.get("platform") == "iOS"] or rts
+          print(ios[0].get("runtimeRoot") or (ios[0]["bundlePath"] + "/Contents/Resources/RuntimeRoot"))')
+          echo "runtimeRoot=$ROOT"
+          P="$ROOT/Applications/MobileSafari.app"
+          [ -d "$P" ] || P=$(ls -d "$ROOT"/Applications/*.app 2>/dev/null | head -1)
+          echo "found: $P"
+          [ -d "$P" ] || { echo "no usable system app"; exit 1; }
           echo "app=$P" >> "$GITHUB_OUTPUT"
 
       - name: Start Appium

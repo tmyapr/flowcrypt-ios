@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Minimal plaintext SMTP server (AUTH LOGIN / AUTH PLAIN / plain mail) for the PoC.
+Minimal SMTP server (AUTH LOGIN / AUTH PLAIN / plain mail) for the PoC.
 
 The FlowCrypt SetupImap screen validates IMAP *and* SMTP on "Connect", so both
 mock services must answer. Every command, plus every decoded AUTH credential,
 is appended to LOG_FILE as a timestamped JSON line.
 
+Accepts cleartext or implicit TLS, whichever the client opens with (see
+tlsserver.py), and records the choice.
+
 Usage: python3 smtp_server.py [--port 2525] [--log /tmp/mock_mail/smtp.log]
+                              [--cert server.pem --key server.key]
 """
 import argparse
 import base64
@@ -14,6 +18,8 @@ import json
 import socketserver
 import threading
 from datetime import datetime, timezone
+
+import tlsserver
 
 LOG_FILE = "/tmp/mock_mail/smtp.log"
 _log_lock = threading.Lock()
@@ -36,14 +42,14 @@ def b64dec(value):
         return "<undecodable>"
 
 
-class SMTPHandler(socketserver.StreamRequestHandler):
+class SMTPHandler(tlsserver.AutoTLSMixin, socketserver.StreamRequestHandler):
     def send(self, text):
         self.wfile.write((text + "\r\n").encode())
         self.wfile.flush()
 
     def handle(self):
         peer = "%s:%s" % self.client_address
-        log("connect", peer=peer)
+        log("connect", peer=peer, transport=self.transport)
         self.send("220 mock-smtp ESMTP ready")
         in_data = False
         while True:
@@ -103,6 +109,8 @@ class SMTPHandler(socketserver.StreamRequestHandler):
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    certfile = None
+    keyfile = None
 
 
 def main():
@@ -110,12 +118,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=2525)
     ap.add_argument("--log", default=LOG_FILE)
+    ap.add_argument("--cert", default=None, help="PEM cert chain for implicit TLS")
+    ap.add_argument("--key", default=None, help="PEM private key for implicit TLS")
     args = ap.parse_args()
     LOG_FILE = args.log
     with open(LOG_FILE, "w") as fh:
         fh.write("")
+    Server.certfile = args.cert
+    Server.keyfile = args.key
+    SMTPHandler.certfile = args.cert
+    SMTPHandler.keyfile = args.key
     srv = Server(("127.0.0.1", args.port), SMTPHandler)
-    log("listening", port=args.port)
+    log("listening", port=args.port, tls=bool(args.cert))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

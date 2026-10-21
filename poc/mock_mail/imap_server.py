@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Minimal plaintext IMAP4rev1 server used as the PoC mail backend.
+Minimal IMAP4rev1 server used as the PoC mail backend.
 
-Why: the FlowCrypt iOS SetupImap screen lets you pick Security type = "none"
-(ConnectionType.none -> MCOConnectionType nil -> plaintext). That removes any
-TLS/certificate problem, so the whole PoC can run offline on a CI runner.
+Why: the FlowCrypt iOS SetupImap screen lets you pick Security type; the PoC
+selects "none", but FlowCrypt maps that to "leave MailCore's default alone", so
+the server accepts both cleartext and implicit TLS (see tlsserver.py) and
+records which one the app actually chose.
 
 Every command received is appended to LOG_FILE as a timestamped JSON line.
 The `LOGIN` command therefore records, in cleartext, the exact credentials the
 app transmitted -- independent evidence from the app's own console log.
 
 Usage: python3 imap_server.py [--port 143] [--log /tmp/mock_mail/imap.log]
+                              [--cert server.pem --key server.key]
 """
 import argparse
 import json
@@ -19,6 +21,8 @@ import socketserver
 import threading
 import time
 from datetime import datetime, timezone
+
+import tlsserver
 
 LOG_FILE = "/tmp/mock_mail/imap.log"
 _log_lock = threading.Lock()
@@ -34,14 +38,14 @@ def log(event, **fields):
             fh.write(line + "\n")
 
 
-class IMAPHandler(socketserver.StreamRequestHandler):
+class IMAPHandler(tlsserver.AutoTLSMixin, socketserver.StreamRequestHandler):
     def send(self, text):
         self.wfile.write((text + "\r\n").encode())
         self.wfile.flush()
 
     def handle(self):
         peer = "%s:%s" % self.client_address
-        log("connect", peer=peer)
+        log("connect", peer=peer, transport=self.transport)
         self.send("* OK [CAPABILITY IMAP4rev1] mock imap ready")
         while True:
             raw = self.rfile.readline()
@@ -102,6 +106,8 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    certfile = None
+    keyfile = None
 
 
 def main():
@@ -109,12 +115,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=143)
     ap.add_argument("--log", default=LOG_FILE)
+    ap.add_argument("--cert", default=None, help="PEM cert chain for implicit TLS")
+    ap.add_argument("--key", default=None, help="PEM private key for implicit TLS")
     args = ap.parse_args()
     LOG_FILE = args.log
     with open(LOG_FILE, "w") as fh:
         fh.write("")
+    Server.certfile = args.cert
+    Server.keyfile = args.key
+    IMAPHandler.certfile = args.cert
+    IMAPHandler.keyfile = args.key
     srv = Server(("127.0.0.1", args.port), IMAPHandler)
-    log("listening", port=args.port)
+    log("listening", port=args.port, tls=bool(args.cert))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
