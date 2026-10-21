@@ -338,6 +338,56 @@ def type_text(text):
         paste_text(text)
 
 
+def detect_rows(f=None, thr=215, lo=110, hi=800, min_dark=6):
+    """Find the vertical centres of the text rows in a form screenshot.
+
+    The table view does not always open at the same scroll offset -- the same
+    field can sit 30 points lower on one run than the next -- so row positions
+    have to be measured from the live screen instead of being hardcoded.
+    Returns logical points, top to bottom.
+    """
+    from PIL import Image
+
+    path = f or device_shot(os.path.join(TMP, "rows.png"))
+    im = Image.open(path).convert("L")
+    w, h = im.size
+    px = im.load()
+    scale = h / float(DEVICE_POINTS[1])
+    out, start = [], None
+    for yy in range(int(lo * scale), min(h, int(hi * scale))):
+        dark = sum(1 for xx in range(0, w, 2) if px[xx, yy] < thr)
+        if dark >= min_dark and start is None:
+            start = yy
+        elif dark < min_dark and start is not None:
+            if yy - start >= 5:
+                out.append(round((start + yy) / 2.0 / scale, 1))
+            start = None
+    print("rows detected: " + ", ".join(f"{i + 1}={y}" for i, y in enumerate(out)))
+    return out
+
+
+def field_row(idx, text, tries=2):
+    """Type into the idx-th detected row (1-based) instead of a fixed y."""
+    rows = detect_rows()
+    if idx < 1 or idx > len(rows):
+        print(f"field_row: no row {idx} (only {len(rows)} detected)")
+        return False
+    y = int(round(rows[idx - 1]))
+    print(f"field_row {idx} -> y={y}")
+    return type_into(201, y, text, tries=tries)
+
+
+def tap_row(idx):
+    rows = detect_rows()
+    if idx < 1 or idx > len(rows):
+        print(f"tap_row: no row {idx}")
+        return False
+    y = int(round(rows[idx - 1]))
+    print(f"tap_row {idx} -> y={y}")
+    click_at(201, y)
+    return True
+
+
 def hide_keyboard():
     """Hide the software keyboard so it never covers the lower rows of a form.
 
@@ -481,6 +531,12 @@ def main():
         print("modifiers released")
     elif cmd == "hidekbd":
         hide_keyboard()
+    elif cmd == "rows":
+        detect_rows()
+    elif cmd == "fieldrow":
+        field_row(int(sys.argv[2]), sys.argv[3])
+    elif cmd == "taprow":
+        tap_row(int(sys.argv[2]))
     elif cmd == "field":
         type_into(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif cmd == "type":

@@ -109,20 +109,26 @@ jobs:
           XC="$(dirname "$(dirname "$(xcode-select -p)")")"
           LIBDIR="$XC/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib"
           TARGET="$LIBDIR/lib_TestingInterop.dylib"
-          if [ -e "$TARGET" ]; then echo "already present"; exit 0; fi
-          SRC=$(find "$XC/Contents/Developer/Platforms/iPhoneSimulator.platform" -maxdepth 6 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
-          [ -n "$SRC" ] || SRC=$(find "$XC/Contents/Developer/Platforms/iPhoneOS.platform" -maxdepth 6 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
-          [ -n "$SRC" ] || SRC=$(find "$XC/Contents/Developer" -maxdepth 8 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
-          if [ -z "$SRC" ]; then
-            echo "REPAIR=impossible (file not found anywhere in Xcode)" >> "$GITHUB_OUTPUT"
-            echo "no copy of lib_TestingInterop.dylib anywhere in Xcode"
-            exit 0
-          fi
-          echo "found copy at: $SRC"
-          sudo mkdir -p "$LIBDIR"
-          sudo ln -sf "$SRC" "$TARGET"
-          ls -la "$TARGET"
-          echo "REPAIR=symlinked" >> "$GITHUB_OUTPUT"
+          SRC=$(find "$XC/Contents/Developer" -maxdepth 8 -name "lib_TestingInterop*.dylib" 2>/dev/null | head -1)
+
+          # xcodebuild resolved the missing path through a *different* Xcode
+          # bundle name than xcode-select reports (Xcode_26.3 vs Xcode_26.3.0),
+          # so patching only the selected bundle left the build failing. Put the
+          # dylib in every Xcode bundle that exists on the image.
+          fixed=""
+          for app in /Applications/Xcode*.app "$XC"; do
+            lib="$app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib"
+            [ -d "$app/Contents/Developer" ] || continue
+            [ -e "$lib/lib_TestingInterop.dylib" ] && { fixed="$fixed $app(already)"; continue; }
+            [ -n "$SRC" ] || continue
+            sudo mkdir -p "$lib"
+            sudo ln -sf "$SRC" "$lib/lib_TestingInterop.dylib"
+            fixed="$fixed $app"
+          done
+          echo "source: ${SRC:-NOT FOUND}"
+          echo "patched:${fixed:- nothing}"
+          [ -n "$SRC" ] && echo "REPAIR=patched" >> "$GITHUB_OUTPUT" || echo "REPAIR=impossible" >> "$GITHUB_OUTPUT"
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
 
       - name: Build WDA for testing the way Appium does
         id: buildwda
@@ -153,6 +159,10 @@ jobs:
           ios=[r for r in rts if r.get("platform")=="iOS"] or rts
           print(ios[0].get("runtimeRoot") or (ios[0]["bundlePath"]+"/Contents/Resources/RuntimeRoot"))')
           APP="$ROOT/Applications/MobileSafari.app"
+          # pin xcodebuild to the selected toolchain: Appium otherwise guesses a
+          # bundle name and hits the path that does not exist
+          export DEVELOPER_DIR="$(xcode-select -p)"
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
           nohup appium --port 4723 --log-level info > out/appium.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:4723/status >/dev/null && break; sleep 2; done
           cat > out/session.json <<JSON
@@ -163,7 +173,7 @@ jobs:
             "appium:deviceName":"iPhone",
             "appium:app":"$APP",
             "appium:noReset":true,
-            "appium:showXcodeLog":false,
+            "appium:showXcodeLog":true,
             "appium:wdaLaunchTimeout":420000,
             "appium:wdaConnectionTimeout":420000,
             "appium:newCommandTimeout":600
