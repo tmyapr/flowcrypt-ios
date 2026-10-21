@@ -178,6 +178,39 @@ def changed(a, b):
     return mean
 
 
+def tap_green(y_from=560, y_to=874, save=None):
+    """Tap the centre of the big green primary button, wherever the layout put it.
+
+    Coordinates measured once go stale the moment a keyboard appears or the form
+    scrolls; the Connect button is the only large saturated-green area in the
+    lower part of the screen, so find it instead of trusting a hardcoded y.
+    """
+    from PIL import Image
+
+    p = os.path.join(TMP, "device.png")
+    device_shot(p)
+    im = Image.open(p).convert("RGB").resize(DEVICE_POINTS)
+    if save:
+        im.save(save)
+    w, h = im.size
+    px = im.load()
+    pts = []
+    for yy in range(max(0, y_from), min(h, y_to)):
+        for xx in range(w):
+            r, g, b = px[xx, yy]
+            if g > 90 and g > r * 1.35 and g > b * 1.25:
+                pts.append((xx, yy))
+    if len(pts) < 500:
+        print(f"tapgreen: only {len(pts)} green pixels below y={y_from} -- not tapping")
+        return False
+    xs = [p0[0] for p0 in pts]
+    ys = [p0[1] for p0 in pts]
+    cx, cy = int(sum(xs) / len(xs)), int(sum(ys) / len(ys))
+    print(f"tapgreen: {len(pts)} px bbox=({min(xs)},{min(ys)})-({max(xs)},{max(ys)}) centre=({cx},{cy})")
+    click_at(cx, cy)
+    return True
+
+
 def to_screen(dx, dy, geo):
     scr = geo["screen"]
     dw = geo.get("device_w") or DEVICE_POINTS[0]
@@ -319,6 +352,9 @@ def main():
         device_shot(sys.argv[2])
     elif cmd == "diff":
         changed(sys.argv[2], sys.argv[3])
+    elif cmd == "tapgreen":
+        lo = int(sys.argv[2]) if len(sys.argv) > 2 else 560
+        tap_green(y_from=lo)
     elif cmd == "dialogs":
         print(list_dialogs())
     elif cmd == "dismiss":

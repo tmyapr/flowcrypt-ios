@@ -192,19 +192,54 @@ jobs:
           UDID='${{ steps.sim.outputs.udid }}'
           BID=$(cat "$OUT/bundle-id.txt")
           D="python3 poc/scripts/drive_ui.py"
+          E="$OUT/login"; mkdir -p "$E"
+
           xcrun simctl io "$UDID" recordVideo --codec=h264 --force "$OUT/demo-1-login.mp4" &
           VID=$!
           sleep 3
-          xcrun simctl launch --console-pty "$UDID" "$BID" 2>&1 | python3 poc/scripts/stamp.py > "$OUT/console-old-login.log" &
+          xcrun simctl launch --console-pty "$UDID" "$BID" 2>&1 \
+            | python3 poc/scripts/stamp.py > "$OUT/console-old-login.log" &
           CONSOLE=$!
-          sleep 12
+          sleep 14
+          $D dismiss
           $D focus
-          $D shot "$OUT/step-00-signin.png"
+          $D devshot "$E/00-signin.png"
+
+          echo "--- open the manual IMAP form ---"
           $D tap 201 630
           sleep 3
-          $D shot "$OUT/step-01-setup.png"
+          $D devshot "$E/01-setup.png"
+
+          echo "--- email ---"
+          $D tap 201 181
+          sleep 1
+          $D paste "$POC_EMAIL"
+          sleep 2
+          $D devshot "$E/02-email.png"
+
+          echo "--- password ---"
+          $D tap 201 293
+          sleep 1
+          $D paste "$POC_PASSWORD"
+          sleep 2
+          $D devshot "$E/03-password.png"
+
+          echo "--- dismiss keyboard on the section header, servers should be auto-filled ---"
+          $D tap 201 348
+          sleep 2
+          $D devshot "$E/04-filled.png"
+
+          echo "--- Connect (found by colour, not by a stale coordinate) ---"
+          $D tapgreen 560
+          sleep 4
+          $D devshot "$E/05-after-connect.png"
+          sleep 18
+          $D devshot "$E/06-result.png"
+
           kill -INT $VID 2>/dev/null; sleep 3
           kill $CONSOLE 2>/dev/null || true
+          echo "=== mock IMAP so far ==="
+          cat /tmp/mock_mail/imap.log 2>/dev/null | tail -12 || true
 
       - name: Collect evidence
         if: always()
