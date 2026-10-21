@@ -148,16 +148,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$OUT" /tmp/mock_mail
-          nohup python3 poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log > "$OUT/mock-imap.stdout" 2>&1 &
-          nohup python3 poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log > "$OUT/mock-smtp.stdout" 2>&1 &
-          sleep 2
-          python3 - <<'PY'
-          import socket
-          for port in (1143, 2525):
-              s = socket.create_connection(("127.0.0.1", port), 5)
-              print(port, s.recv(200))
-              s.close()
-          PY
+          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log > "$OUT/mock-imap.stdout" 2>&1 &
+          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log > "$OUT/mock-smtp.stdout" 2>&1 &
+          # python startup on the hosted runner is slow (~5s), so retry instead of
+          # probing once - a single-shot connect was what failed earlier
+          if ! python3 poc/scripts/wait_ports.py 1143 2525 --timeout=45; then
+            echo "--- mock server output ---"
+            cat "$OUT"/mock-imap.stdout "$OUT"/mock-smtp.stdout || true
+            exit 1
+          fi
+          python3 poc/scripts/assert_mail_flow.py 1143 2525 || {
+            echo "--- mock server output ---"
+            cat "$OUT"/mock-imap.stdout "$OUT"/mock-smtp.stdout || true
+            exit 1
+          }
 
       - name: Start Appium server
         run: |

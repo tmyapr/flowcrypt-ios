@@ -15,6 +15,7 @@ command -v gh >/dev/null || { echo "gh CLI missing: sudo apt-get install -y gh  
 gh auth status >/dev/null 2>&1 || { echo "not logged in - run: gh auth login"; exit 1; }
 
 ME="$(gh api user -q .login)"
+gh auth setup-git >/dev/null 2>&1 || true   # make https push use the gh token
 echo "==> authenticated as $ME"
 
 mkdir -p "$WORK"
