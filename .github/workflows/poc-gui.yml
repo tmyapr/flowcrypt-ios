@@ -97,6 +97,11 @@ jobs:
         run: |
           set -euo pipefail
           UDID='${{ steps.sim.outputs.udid }}'
+          # cliclick is gone on every fresh runner image
+          if ! command -v cliclick >/dev/null; then
+            brew install cliclick 2>&1 | tail -3
+          fi
+          command -v cliclick
           open -a Simulator --args -CurrentDeviceUDID "$UDID"
           sleep 20
           osascript -e 'tell application "Simulator" to activate' || true
@@ -119,14 +124,25 @@ jobs:
           xcrun simctl keychain "$UDID" add-root-cert "$OUT/certs/ca.pem"
           echo "root CA installed"
 
+      - name: Point the mock hostnames at localhost
+        run: |
+          set -euo pipefail
+          echo "127.0.0.1 imap.mockmail.test smtp.mockmail.test" | sudo tee -a /etc/hosts
+          tail -2 /etc/hosts
+          python3 -c "import socket;print(socket.gethostbyname('imap.mockmail.test'), socket.gethostbyname('smtp.mockmail.test'))"
+
       - name: Start mock IMAP/SMTP servers
         run: |
           set -euo pipefail
           mkdir -p "$OUT" /tmp/mock_mail
+          sudo mkdir -p /tmp/mock_mail
+          sudo chmod 777 /tmp/mock_mail
           TLS=(--cert "$OUT/certs/server-chain.pem" --key "$OUT/certs/server.key")
-          nohup python3 -u poc/mock_mail/imap_server.py --port 1143 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
-          nohup python3 -u poc/mock_mail/smtp_server.py --port 2525 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
-          python3 poc/scripts/wait_ports.py 1143 2525 --timeout=45
+          # 993/465 are what the app auto-fills from the domain, and they are
+          # privileged, so the mocks run as root.
+          sudo nohup python3 -u poc/mock_mail/imap_server.py --port 993 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
+          sudo nohup python3 -u poc/mock_mail/smtp_server.py --port 465 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
+          python3 poc/scripts/wait_ports.py 993 465 --timeout=45
 
       - name: Install and launch old build with console capture
         id: launch

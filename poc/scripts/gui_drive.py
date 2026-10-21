@@ -75,6 +75,60 @@ def screenshot(path):
     run(["screencapture", "-x", path])
 
 
+def measure_mapping(device_w, device_h, save_dir="."):
+    """Locate the device screen inside a desktop screenshot.
+
+    The window is 456x972 for a 402x874 device, but the leftover 98 points of
+    chrome are not centred: ~80 of them sit above the screen (title bar plus
+    bezel) and ~18 below. Guessing the split puts every click off by tens of
+    points, so match the real device screenshot against the desktop capture
+    using 1-D luminance profiles -- content independent and cheap.
+    """
+    from PIL import Image
+
+    desktop = os.path.join(save_dir, "map-desktop.png")
+    device = os.path.join(save_dir, "map-device.png")
+    screenshot(desktop)
+    run(["xcrun", "simctl", "io", "booted", "screenshot", device])
+
+    x, y, w, h = window_rect()
+    im = Image.open(desktop).convert("L")
+    W, H = im.size
+    x = max(0, min(x, W - 1)); y = max(0, min(y, H - 1))
+    w = max(1, min(w, W - x)); height = max(1, min(h, H - y))
+    crop = im.crop((x, y, x + w, y + height))
+    cw, ch = crop.size
+
+    dev = Image.open(device).convert("L").resize((device_w, device_h))
+
+    def row_profile(img):
+        ww, hh = img.size
+        px = img.load()
+        step = 4
+        cols = list(range(0, ww, step))
+        return [sum(px[xx, yy] for xx in cols) / float(len(cols)) for yy in range(hh)]
+
+    def col_profile(img):
+        ww, hh = img.size
+        px = img.load()
+        step = 4
+        rows = list(range(0, hh, step))
+        return [sum(px[xx, yy] for yy in rows) / float(len(rows)) for xx in range(ww)]
+
+    crows, ccols = row_profile(crop), col_profile(crop)
+    drows, dcols = row_profile(dev), col_profile(dev)
+
+    best_y = min(range(0, ch - device_h + 1),
+                 key=lambda dy: sum(abs(drows[i] - crows[dy + i]) for i in range(0, device_h, 8)))
+    best_x = min(range(0, cw - device_w + 1),
+                 key=lambda dx: sum(abs(dcols[i] - ccols[dx + i]) for i in range(0, device_w, 8)))
+    print(f"device screen found at window offset ({best_x},{best_y}) size {device_w}x{device_h}")
+    return {"window": {"x": x, "y": y, "w": w, "h": height},
+            "device": {"w": device_w, "h": device_h},
+            "scale": 1.0,
+            "origin": {"x": x + best_x, "y": y + best_y}}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--actions", required=True)
@@ -90,23 +144,7 @@ def main():
 
     focus_simulator()
     point_accurate()
-    x, y, w, h = window_rect()
-    # With Point Accurate the content width equals the device width in points;
-    # whatever is left over is window chrome (title bar / thin border).
-    scale = w / float(args.device_width)
-    chrome_y = h - args.device_height * scale
-    if chrome_y < 0:
-        # Window is smaller than the device: fall back to fitting by height.
-        chrome_y = 0.0
-        scale = h / float(args.device_height)
-    mapping = {
-        "window": {"x": x, "y": y, "w": w, "h": h},
-        "device": {"w": args.device_width, "h": args.device_height},
-        "scale": round(scale, 4),
-        "chrome_y": round(chrome_y, 1),
-        "origin": {"x": round(x + (w - args.device_width * scale) / 2.0, 1),
-                   "y": round(y + chrome_y, 1)},
-    }
+    mapping = measure_mapping(args.device_width, args.device_height, save_dir=args.out)
     print("mapping:", json.dumps(mapping))
     if args.map:
         with open(args.map, "w") as fh:
