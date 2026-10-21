@@ -192,6 +192,69 @@ def shot(path):
     print(f"shot {path}")
 
 
+DIALOG_PROCS = ["UserNotificationCenter", "CoreServicesUIAgent", "SecurityAgent",
+                "SystemUIServer", "NotificationCenter"]
+
+
+def list_dialogs():
+    """Enumerate windows+buttons of the processes macOS uses for prompts."""
+    script = """
+    set out to ""
+    repeat with pname in {%s}
+      try
+        tell application "System Events" to tell process pname
+          repeat with w in windows
+            set out to out & pname & "|" & (name of w as text) & "|"
+            repeat with b in buttons of w
+              set out to out & (name of b as text) & ","
+            end repeat
+            set out to out & linefeed
+          end repeat
+        end tell
+      end try
+    end repeat
+    return out
+    """ % ", ".join(f'"{p}"' for p in DIALOG_PROCS)
+    return osa(script)
+
+
+def dismiss(targets=("Allow", "OK", "Don't Allow")):
+    """Click away a system permission prompt that covers the Simulator window.
+
+    Binding the mock mail servers to a listening port makes macOS 15 raise the
+    local-network prompt; if it is left up, a tap meant for the app lands on the
+    prompt instead. Returns the label that was clicked, or "".
+    """
+    for label in targets:
+        script = """
+        set clicked to ""
+        repeat with pname in {%s}
+          try
+            tell application "System Events" to tell process pname
+              repeat with w in windows
+                try
+                  if exists (button "%s" of w) then
+                    click button "%s" of w
+                    set clicked to pname & "/" & "%s"
+                    exit repeat
+                  end if
+                end try
+              end repeat
+            end tell
+          end try
+          if clicked is not "" then exit repeat
+        end repeat
+        return clicked
+        """ % (", ".join(f'"{p}"' for p in DIALOG_PROCS), label, label, label)
+        res = osa(script)
+        if res:
+            print(f"dismissed prompt by clicking {label!r} ({res})")
+            time.sleep(0.6)
+            return label
+    print("no system prompt to dismiss")
+    return ""
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__); return 2
@@ -210,6 +273,10 @@ def main():
         swipe(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]))
     elif cmd == "shot":
         shot(sys.argv[2])
+    elif cmd == "dialogs":
+        print(list_dialogs())
+    elif cmd == "dismiss":
+        dismiss()
     else:
         print(f"unknown command {cmd}"); return 2
     return 0

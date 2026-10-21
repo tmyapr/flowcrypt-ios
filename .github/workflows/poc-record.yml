@@ -138,6 +138,14 @@ jobs:
           sleep 20
           xcrun simctl launch "$UDID" "$BID" || true
           sleep 12
+          D="python3 poc/scripts/drive_ui.py"
+          # macOS 15 raises a local-network prompt for the mock-mail process; it
+          # lands on top of the Simulator window and would swallow our taps.
+          $D dismiss
+          sleep 2
+          $D dismiss
+          echo "--- dialog inventory (empty = clean) ---"
+          $D dialogs
           python3 poc/scripts/drive_ui.py focus
           python3 poc/scripts/drive_ui.py geom
           # keep the window screenshot out of the artifact if calibration failed
@@ -150,11 +158,20 @@ jobs:
           set -uo pipefail
           D="python3 poc/scripts/drive_ui.py"
           mkdir -p "$OUT/explore"
+          $D dismiss
           $D shot "$OUT/explore/00-signin.png"
           echo "--- tap Other email provider (measured from the screenshot) ---"
           $D tap 201 630
+          $D dismiss
           sleep 3
           $D shot "$OUT/explore/01-after-other.png"
+          echo "--- dialog inventory after first tap ---"
+          $D dialogs
+          # if the tap was swallowed, try once more after clearing any prompt
+          cp /tmp/drive_ui/desktop.png "$OUT/explore/01-desktop.png" 2>/dev/null || true
+          $D tap 201 630
+          sleep 3
+          $D shot "$OUT/explore/01b-after-other-retry.png"
           for i in 2 3 4 5; do
             $D swipe 201 720 201 260
             sleep 2
