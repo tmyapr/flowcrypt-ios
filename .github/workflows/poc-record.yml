@@ -114,11 +114,17 @@ jobs:
           set -euo pipefail
           mkdir -p "$OUT" /tmp/mock_mail
           TLS=(--cert "$OUT/certs/server-chain.pem" --key "$OUT/certs/server.key")
-          nohup python3 -u poc/mock_mail/imap_server.py --port 993 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
-          nohup python3 -u poc/mock_mail/smtp_server.py --port 465 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
+          # 993/465 are privileged ports: the servers have to run as root.
+          sudo mkdir -p /tmp/mock_mail
+          sudo chmod 777 /tmp/mock_mail
+          sudo touch /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log
+          sudo chmod 666 /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log
+          sudo nohup python3 -u poc/mock_mail/imap_server.py --port 993 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
+          sudo nohup python3 -u poc/mock_mail/smtp_server.py --port 465 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
           python3 poc/scripts/wait_ports.py 993 465 --timeout=45 || { cat "$OUT"/mock-*.stdout; exit 1; }
           POC_PORT_OFFSET=0 python3 poc/scripts/assert_mail_flow.py 993 465 || {
             cat "$OUT"/mock-*.stdout; exit 1; }
+          sudo chmod 666 /tmp/mock_mail/*.log
 
       - name: Install and launch the old build, open Simulator window
         id: launch
@@ -134,6 +140,8 @@ jobs:
           sleep 12
           python3 poc/scripts/drive_ui.py focus
           python3 poc/scripts/drive_ui.py geom
+          # keep the window screenshot out of the artifact if calibration failed
+          cp /tmp/drive_ui/desktop.png "$OUT/calibration-desktop.png" 2>/dev/null || true
 
       - name: Explore the sign-in and setup screens
         if: github.event.inputs.phase == 'explore'
