@@ -1,0 +1,139 @@
+name: wda-probe
+
+# Fast diagnostic (no app build, ~4 min): can Appium build + launch
+# WebDriverAgent on a GitHub-hosted macOS runner?
+#
+# If WDA cannot start, this prints the real xcodebuild error instead of the
+# generic "xcodebuild exited with code 65" we got inside the full PoC run.
+# Session target is MobileSafari.app (already in the simulator runtime), so no
+# FlowCrypt build is needed to answer the question.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+      driver_version:
+        description: 'xcuitest driver version (empty = latest)'
+        default: ''
+
+jobs:
+  probe:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          PICKED=""
+          for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+            [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
+          done
+          [ -n "$PICKED" ] && sudo xcode-select -s "$PICKED"
+          xcodebuild -version
+          node --version
+          python3 -V
+
+      - name: Install Appium + xcuitest driver
+        run: |
+          set -euo pipefail
+          npm install -g appium@latest
+          appium --version
+          DV='${{ github.event.inputs.driver_version }}'
+          if [ -n "$DV" ]; then appium driver install xcuitest@"$DV"; else appium driver install xcuitest; fi
+          appium driver list --installed
+
+      - name: Boot simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          for rt,devs in d.items():
+              for dev in devs:
+                  if "iPhone" in dev["name"] and dev.get("isAvailable"):
+                      print(dev["udid"]); raise SystemExit
+          raise SystemExit("no iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          echo "runtime: $(xcrun simctl list devices | grep "$UDID")"
+
+      - name: Locate MobileSafari.app inside the runtime
+        id: safari
+        run: |
+          set -uo pipefail
+          P=$(find /Applications/Xcode*.app/Contents/Developer -maxdepth 12 -name "MobileSafari.app" -type d 2>/dev/null | head -1)
+          echo "found: ${P:-<none>}"
+          echo "app=$P" >> "$GITHUB_OUTPUT"
+
+      - name: Start Appium
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          nohup appium --port 4723 --log-level debug > out/appium.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:4723/status >/dev/null && { echo up; break; }
+            sleep 2
+          done
+          curl -s http://127.0.0.1:4723/status; echo
+
+      - name: Try to create a WDA session (this is the real test)
+        id: session
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          APP='${{ steps.safari.outputs.app }}'
+          cat > out/session.json <<JSON
+          {"capabilities":{"alwaysMatch":{
+            "platformName":"iOS",
+            "appium:automationName":"XCUITest",
+            "appium:udid":"$UDID",
+            "appium:deviceName":"iPhone",
+            "appium:app":"$APP",
+            "appium:noReset":true,
+            "appium:showXcodeLog":true,
+            "appium:wdaLaunchTimeout":420000,
+            "appium:wdaConnectionTimeout":420000,
+            "appium:newCommandTimeout":600
+          }}}
+          JSON
+          echo "--- request ---"; cat out/session.json
+          curl -sS -X POST http://127.0.0.1:4723/session \
+            -H 'Content-Type: application/json' \
+            --max-time 900 --data @out/session.json | tee out/session-response.json
+          echo
+          python3 - <<'PY'
+          import json
+          try:
+              r = json.load(open('out/session-response.json'))
+          except Exception as e:
+              print('unparseable response:', e); raise SystemExit(0)
+          v = r.get('value', {})
+          if r.get('status') == 0 or 'sessionId' in r:
+              print('WDA_OK sessionId=', r.get('sessionId') or v.get('sessionId'))
+          else:
+              print('WDA_FAIL', json.dumps(v)[:2000])
+          PY
+
+      - name: If WDA failed, surface the compiler error
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "===== appium.log (WDA build sections) ====="
+          grep -nE "xcodebuild|error:|BUILD FAILED|BUILD SUCCEEDED|WebDriverAgent|Signing|code 65" out/appium.log | tail -80 || true
+          echo
+          echo "===== last 120 lines ====="
+          tail -120 out/appium.log || true
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wda-probe-${{ github.run_id }}
+          path: out
