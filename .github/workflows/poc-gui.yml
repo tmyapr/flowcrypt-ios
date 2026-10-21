@@ -41,6 +41,14 @@ jobs:
       - name: Checkout harness
         uses: actions/checkout@v4
 
+      - name: Install GUI tools
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUT"
+          which cliclick || brew install cliclick
+          cliclick -V || true
+          python3 -c "import PIL; print('Pillow', PIL.__version__)" || pip3 install --break-system-packages pillow
+
       - name: Download built apps
         uses: actions/download-artifact@v4
         with:
