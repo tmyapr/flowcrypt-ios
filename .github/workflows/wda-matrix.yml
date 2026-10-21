@@ -1,0 +1,154 @@
+name: wda-matrix
+
+# WebDriverAgent on this runner image fails with:
+#   error: lstat(.../iPhoneSimulator.platform/Developer/usr/lib/lib_TestingInterop.dylib):
+#          No such file or directory  (in target 'WebDriverAgentRunner')
+#   ** TEST BUILD FAILED **
+#
+# xcode-probe showed that dylib is missing from EVERY Xcode on the image
+# (16.0 ... 26.3), so no Xcode choice fixes it. The reference to it comes from
+# the bundled appium-webdriveragent version, not from Xcode.
+#
+# This job builds WDA once per candidate xcuitest-driver version and reports
+# which one links against a dylib that does not exist here.
+#
+# Also covers Appium 2 + older driver, which is where pre-Xcode-26 WDA lives.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS runner label'
+        default: 'macos-15-intel'
+      xcode:
+        description: 'Xcode .app to use, e.g. Xcode_16.4.app (empty = newest)'
+        default: 'Xcode_16.4.app'
+      appium3_drivers:
+        description: 'comma-separated xcuitest versions for Appium 3'
+        default: '12.1.0,12.5.0,12.19.1'
+      appium2_driver:
+        description: 'xcuitest version for Appium 2 (pre-Xcode-26 WDA), empty to skip'
+        default: '7.35.2'
+
+jobs:
+  matrix:
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        id: xc
+        run: |
+          set -euo pipefail
+          WANT='${{ github.event.inputs.xcode }}'
+          if [ -n "$WANT" ] && [ -d "/Applications/$WANT" ]; then
+            PICKED="/Applications/$WANT"
+          else
+            for app in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V -r); do
+              [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ] && PICKED="$app" && break
+            done
+          fi
+          sudo xcode-select -s "$PICKED"
+          echo "PICKED=$PICKED" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun simctl list runtimes | head -5
+
+      - name: Boot a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          for rt,devs in d.items():
+              for dev in devs:
+                  if "iPhone" in dev["name"] and dev.get("isAvailable"):
+                      print(dev["udid"]); raise SystemExit
+          raise SystemExit("no iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          echo "device: $(xcrun simctl list devices | grep "$UDID")"
+
+      - name: Appium 3 driver matrix
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          npm install -g appium@3 >/dev/null 2>&1
+          echo "appium: $(appium --version)" | tee -a out/matrix.txt
+          IFS=',' read -ra VERS <<< '${{ github.event.inputs.appium3_drivers }}'
+          for DV in "${VERS[@]}"; do
+            DV="$(echo "$DV" | tr -d ' ')"
+            [ -n "$DV" ] || continue
+            echo "===== xcuitest@$DV (appium 3) =====" | tee -a out/matrix.txt
+            appium driver uninstall xcuitest >/dev/null 2>&1 || true
+            if ! appium driver install xcuitest@"$DV" >>out/install-$DV.log 2>&1; then
+              echo "INSTALL_FAILED $DV" | tee -a out/matrix.txt
+              continue
+            fi
+            WDA_DIR="$HOME/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent"
+            WDAV=$(python3 -c "import json;print(json.load(open('$WDA_DIR/package.json'))['version'])" 2>/dev/null || echo unknown)
+            echo "WDA=$WDAV" | tee -a out/matrix.txt
+            # Does this WDA even reference the missing dylib?
+            if grep -rq "lib_TestingInterop" "$WDA_DIR" 2>/dev/null; then
+              echo "references lib_TestingInterop: YES" | tee -a out/matrix.txt
+            else
+              echo "references lib_TestingInterop: NO" | tee -a out/matrix.txt
+            fi
+            LOG="out/build-$DV.log"
+            ( cd "$WDA_DIR" && xcodebuild build-for-testing test-without-building \
+                -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+                -destination "id=${{ steps.sim.outputs.udid }}" \
+                GCC_TREAT_WARNINGS_AS_ERRORS=0 COMPILER_INDEX_STORE_ENABLE=NO ) > "$LOG" 2>&1
+            RC=$?
+            RES=$(grep -aoE "TEST BUILD (SUCCEEDED|FAILED)" "$LOG" | tail -1)
+            ERRS=$(grep -a "error:" "$LOG" | head -3 | cut -c1-160)
+            echo "exit=$RC result=${RES:-none}" | tee -a out/matrix.txt
+            [ -n "$ERRS" ] && echo "$ERRS" | tee -a out/matrix.txt
+            if [ "$RES" = "TEST BUILD SUCCEEDED" ]; then
+              echo ">>> WINNER: appium3 xcuitest@$DV (WDA $WDAV)" | tee -a out/matrix.txt
+              echo "WINNER_APPIUM3=$DV" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+
+      - name: Appium 2 + older driver (pre-Xcode-26 WDA)
+        if: env.WINNER_APPIUM3 == ''
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          DV='${{ github.event.inputs.appium2_driver }}'
+          [ -n "$DV" ] || { echo "skipped"; exit 0; }
+          mkdir -p out/appium2
+          echo "===== appium 2 + xcuitest@$DV =====" | tee -a out/matrix.txt
+          ( cd out/appium2 && npm init -y >/dev/null 2>&1 && npm install appium@2 >/dev/null 2>&1 )
+          APPIUM2="node out/appium2/node_modules/appium/index.js"
+          APPIUM_HOME="$PWD/out/appium2-home" $APPIUM2 driver install xcuitest@"$DV" >out/appium2/install.log 2>&1 || { echo "INSTALL_FAILED $DV" | tee -a out/matrix.txt; exit 0; }
+          WDA_DIR="$PWD/out/appium2-home/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent"
+          WDAV=$(python3 -c "import json;print(json.load(open('$WDA_DIR/package.json'))['version'])" 2>/dev/null || echo unknown)
+          echo "WDA=$WDAV" | tee -a out/matrix.txt
+          grep -rq "lib_TestingInterop" "$WDA_DIR" 2>/dev/null && echo "references lib_TestingInterop: YES" | tee -a out/matrix.txt || echo "references lib_TestingInterop: NO" | tee -a out/matrix.txt
+          LOG="out/build-appium2-$DV.log"
+          ( cd "$WDA_DIR" && xcodebuild build-for-testing test-without-building \
+              -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+              -destination "id=${{ steps.sim.outputs.udid }}" \
+              GCC_TREAT_WARNINGS_AS_ERRORS=0 COMPILER_INDEX_STORE_ENABLE=NO ) > "$LOG" 2>&1
+          RC=$?
+          RES=$(grep -aoE "TEST BUILD (SUCCEEDED|FAILED)" "$LOG" | tail -1)
+          echo "exit=$RC result=${RES:-none}" | tee -a out/matrix.txt
+          grep -a "error:" "$LOG" | head -3 | cut -c1-160 | tee -a out/matrix.txt || true
+          [ "$RES" = "TEST BUILD SUCCEEDED" ] && echo ">>> WINNER: appium2 xcuitest@$DV (WDA $WDAV)" | tee -a out/matrix.txt
+
+      - name: Verdict
+        if: always()
+        run: |
+          echo "===== MATRIX ====="; cat out/matrix.txt 2>/dev/null || true
+
+      - name: Upload matrix logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wda-matrix-${{ github.run_id }}
+          path: out
