@@ -75,64 +75,81 @@ def point_accurate():
 
 
 def device_rect():
-    """Locate the device screen inside the Simulator window, in screen pixels."""
+    """Locate the device screen inside the Simulator window, in screen pixels.
+
+    Brightness heuristics are fragile: they break as soon as the app draws a
+    dark screen, a dialog appears, or the wallpaper is dark. So this matches the
+    real device screenshot (`simctl io screenshot`) against the desktop capture
+    using 1-D luminance profiles -- content independent and cheap.
+    """
     from PIL import Image
 
     activate()
     win = window_frame()
-    shot = os.path.join(TMP, "desktop.png")
-    run(["screencapture", "-x", shot], check=True)
-    im = Image.open(shot).convert("L")
+    desktop = os.path.join(TMP, "desktop.png")
+    device = os.path.join(TMP, "device.png")
+    run(["screencapture", "-x", desktop], check=True)
+    run(["xcrun", "simctl", "io", "booted", "screenshot", device], check=True)
+
+    im = Image.open(desktop).convert("L")
+    # device screenshots come at 3x; normalise to logical points so the scale
+    # search below works in the same units as the taps
+    dev = Image.open(device).convert("L").resize(DEVICE_POINTS)
     W, H = im.size
     x, y, w, h = win
     x = max(0, min(x, W - 1)); y = max(0, min(y, H - 1))
     w = max(1, min(w, W - x)); h = max(1, min(h, H - y))
     crop = im.crop((x, y, x + w, y + h))
     cw, ch = crop.size
-    px = crop.load()
 
-    def bright_rows():
-        rows = []
-        for yy in range(ch):
+    def row_profile(img):
+        ww, hh = img.size
+        p = img.load()
+        return [sum(p[xx, yy] for xx in range(0, ww, 4)) / len(range(0, ww, 4))
+                for yy in range(hh)]
+
+    def col_profile(img):
+        ww, hh = img.size
+        p = img.load()
+        return [sum(p[xx, yy] for yy in range(0, hh, 4)) / len(range(0, hh, 4))
+                for xx in range(ww)]
+
+    crows, ccols = row_profile(crop), col_profile(crop)
+    best = None
+    # Point Accurate gives scale 1; the rest are there for when the menu item is
+    # unavailable and Simulator picked its own zoom.
+    for scale in (1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65):
+        tw, th = int(round(dev.size[0] * scale)), int(round(dev.size[1] * scale))
+        if tw >= cw or th >= ch or tw < 100:
+            continue
+        small = dev.resize((tw, th))
+        drows, dcols = row_profile(small), col_profile(small)
+        # slide vertically
+        bestdy, bestrow = None, None
+        for dy in range(0, ch - th + 1):
             s = 0
-            for xx in range(0, cw, 3):
-                s += px[xx, yy]
-            rows.append(s / max(1, len(range(0, cw, 3))))
-        return rows
-
-    def bright_cols():
-        cols = []
-        for xx in range(cw):
+            for i in range(0, th, 8):
+                s += abs(drows[i] - crows[dy + i])
+            if bestrow is None or s < bestrow:
+                bestrow, bestdy = s, dy
+        bestdx, bestcol = None, None
+        for dx in range(0, cw - tw + 1):
             s = 0
-            for yy in range(0, ch, 3):
-                s += px[xx, yy]
-            cols.append(s / max(1, len(range(0, ch, 3))))
-        return cols
+            for i in range(0, tw, 8):
+                s += abs(dcols[i] - ccols[dx + i])
+            if bestcol is None or s < bestcol:
+                bestcol, bestdx = s, dx
+        score = (bestrow / max(1, th / 8)) + (bestcol / max(1, tw / 8))
+        if best is None or score < best[0]:
+            best = (score, scale, bestdx, bestdy, tw, th)
 
-    rows, cols = bright_rows(), bright_cols()
-    THR = 170
-
-    def longest_run(vals):
-        best = (0, 0, 0)
-        start = None
-        for i, v in enumerate(vals):
-            if v > THR and start is None:
-                start = i
-            elif v <= THR and start is not None:
-                if i - start > best[0]:
-                    best = (i - start, start, i - 1)
-                start = None
-        if start is not None and len(vals) - start > best[0]:
-            best = (len(vals) - start, start, len(vals) - 1)
-        return best[1], best[2]
-
-    top, bottom = longest_run(rows)
-    left, right = longest_run(cols)
-    if bottom <= top or right <= left:
-        raise RuntimeError(f"could not find the device screen inside window {win}")
+    if best is None:
+        raise RuntimeError(f"could not match the device screen inside window {win}")
+    score, scale, dx, dy, tw, th = best
     return {
         "win": {"x": x, "y": y, "w": w, "h": h},
-        "screen": {"x": x + left, "y": y + top, "w": right - left + 1, "h": bottom - top + 1},
+        "screen": {"x": x + dx, "y": y + dy, "w": tw, "h": th},
+        "calibration": {"scale": scale, "score": round(score, 2)},
     }
 
 
