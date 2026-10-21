@@ -261,19 +261,23 @@ jobs:
           $D tapnav 201 630
           $D devshot "$E/01-setup.png"
 
-          echo "--- email ---"
+          # the on-screen keyboard would push the lower rows around, and the
+          # paste still works through the hardware keyboard
+          $D hidekbd
+
+          echo "--- email (servers auto-fill from the domain) ---"
           $D field 201 181 "$POC_EMAIL"
           $D devshot "$E/02-email.png"
-
-          echo "--- keyboard away so the next field is where we expect it ---"
-          $D tapnav 201 348
 
           echo "--- password ---"
           $D field 201 293 "$POC_PASSWORD"
           $D devshot "$E/03-password.png"
 
-          echo "--- dismiss keyboard on the section header, servers should be auto-filled ---"
-          $D tapnav 201 348
+          # the old build fills server + security type but leaves both ports blank
+          echo "--- IMAP port 993 ---"
+          $D field 201 458 993
+          echo "--- SMTP port 465 ---"
+          $D field 201 679 465
           $D devshot "$E/04-filled.png"
 
           echo "--- Connect (found by colour, not by a stale coordinate) ---"

@@ -215,6 +215,7 @@ def tap_green(y_from=560, y_to=874, save=None, tries=3):
         geo = geom()
         sx, sy = to_screen(cx, cy, geo)
         activate()
+        release_modifiers()
         subprocess.run(["cliclick", f"m:{sx},{sy}", "w:250", f"c:{sx},{sy}"], check=True)
         time.sleep(3.0)
         device_shot(after)
@@ -270,6 +271,7 @@ def clear_geom():
 def click_at(dx, dy):
     geo = geom()
     sx, sy = to_screen(dx, dy, geo)
+    release_modifiers()
     subprocess.run(["cliclick", f"m:{sx},{sy}", "w:120", f"c:{sx},{sy}"], check=True)
     print(f"tap device=({dx},{dy}) screen=({sx},{sy}) screen_rect={geo['screen']}")
     time.sleep(0.5)
@@ -291,6 +293,7 @@ def tap_nav(dx, dy, tries=4, min_diff=1.0):
         sx, sy = to_screen(dx, dy, geo)
         activate()  # as late as possible: the click must land on Simulator
         device_shot(before)
+        release_modifiers()
         subprocess.run(["cliclick", f"m:{sx},{sy}", "w:250", f"c:{sx},{sy}"], check=True)
         time.sleep(2.0)
         device_shot(after)
@@ -304,10 +307,24 @@ def tap_nav(dx, dy, tries=4, min_diff=1.0):
     return False
 
 
+def release_modifiers():
+    """Make sure no modifier key is left logically down.
+
+    A paste done with cliclick's kd:cmd / ku:cmd leaves Command held whenever the
+    key-up event is dropped. Every later click then arrives as a Command-click,
+    which the Simulator ignores -- the app looks hung (touches do nothing, but
+    its main thread is idle in CFRunLoop) even though it is perfectly healthy.
+    """
+    subprocess.run(["cliclick", "ku:cmd", "ku:alt", "ku:shift", "ku:ctrl"],
+                   check=False)
+
+
 def paste_text(text):
     """Paste via clipboard: reliable for @ . ! and anything else."""
     subprocess.run(["pbcopy"], input=text, text=True, check=True)
-    subprocess.run(["cliclick", "kd:cmd", "t:v", "ku:cmd"], check=True)
+    # keystroke ... using command down always releases the modifier
+    osa('tell application "System Events" to keystroke "v" using command down')
+    release_modifiers()
     print(f"pasted {len(text)} chars")
 
 
@@ -321,16 +338,34 @@ def type_text(text):
         paste_text(text)
 
 
+def hide_keyboard():
+    """Hide the software keyboard so it never covers the lower rows of a form.
+
+    Tapping a field with the keyboard up makes iOS scroll the table to keep that
+    field visible, and every coordinate measured from a screenshot then points at
+    the wrong row. The hardware keyboard stays connected (that is what pastes the
+    text), so hiding the on-screen one keeps the layout stable.
+    """
+    activate()
+    release_modifiers()
+    subprocess.run(["cliclick", "kd:cmd", "t:k", "ku:cmd"], check=False)
+    release_modifiers()
+    print("software keyboard toggled off")
+
+
 def type_into(dx, dy, text, tries=3):
-    """Focus a text field, paste, and check that the field actually changed."""
+    """Focus a text field, paste, and verify that the screen actually changed.
+
+    The tap itself is only a means, so it is not verified on its own: with the
+    software keyboard hidden, moving focus between fields can change as little as
+    a caret. What matters is that the text landed, so that is what gets measured.
+    """
     before = os.path.join(TMP, "before.png")
     after = os.path.join(TMP, "after.png")
-    # moving the caret from one field to the next is a tiny visual change, so a
-    # strict threshold would reject a perfectly good tap and retry four times
-    if not tap_nav(dx, dy, tries=tries, min_diff=0.2):
-        print(f"type_into: tapping ({dx},{dy}) never changed the screen (no keyboard?)")
-        return False
-    for attempt in range(1, 3):
+    for attempt in range(1, tries + 1):
+        click_at(dx, dy)
+        time.sleep(0.4)
+        click_at(dx, dy)  # a second identical tap is harmless and fixes lost focus
         device_shot(before)
         paste_text(text)
         time.sleep(1.2)
@@ -339,13 +374,15 @@ def type_into(dx, dy, text, tries=3):
         print(f"type_into ({dx},{dy}) attempt={attempt} diff={d:.2f}")
         if d >= 0.3:
             return True
-        print("  field looks unchanged -- retrying the paste")
+        print("  field looks unchanged -- retrying")
+    print(f"type_into gave up at ({dx},{dy}): the text never appeared")
     return False
 
 
 def swipe(x1, y1, x2, y2):
     geo = geom()
     a = to_screen(x1, y1, geo); b = to_screen(x2, y2, geo)
+    release_modifiers()
     subprocess.run(["cliclick", f"m:{a[0]},{a[1]}", "w:100", f"dd:{a[0]},{a[1]}",
                     "w:80", f"dm:{int((a[0]+b[0])/2)},{int((a[1]+b[1])/2)}",
                     "w:80", f"du:{b[0]},{b[1]}"], check=True)
@@ -439,6 +476,11 @@ def main():
     elif cmd == "cleargeom":
         clear_geom()
         print("geometry cache cleared")
+    elif cmd == "release":
+        release_modifiers()
+        print("modifiers released")
+    elif cmd == "hidekbd":
+        hide_keyboard()
     elif cmd == "field":
         type_into(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif cmd == "type":
