@@ -20,6 +20,9 @@ on:
       new_sha:
         description: 'commit that hides IMAP sign-in (upgrade target)'
         default: '842645b207296bbd852f7ad1b4ea6ba3881d2d10'
+      runner:
+        description: 'macOS runner label (macos-15-intel avoids the arm64 queue)'
+        default: 'macos-15-intel'
 
 env:
   UPSTREAM: https://github.com/FlowCrypt/flowcrypt-ios.git
@@ -34,7 +37,7 @@ jobs:
     # macos-13/macos-14 are retired upstream; macos-15 is the oldest still
     # hosted image. Only one Xcode major per image, so the picker below just
     # takes whatever is installed (16.x here).
-    runs-on: macos-15
+    runs-on: ${{ github.event.inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 150
 
     steps:
