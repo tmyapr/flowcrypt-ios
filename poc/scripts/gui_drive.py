@@ -200,25 +200,33 @@ def detect_rows(path, device_h=874, thr=215, lo=110, hi=800, min_dark=6):
         merged.append(r)
     return merged
 
-
 def find_green(path, y_from=500, device_h=874):
-    """Centre (device points) of the big green primary button, or None."""
+    """(centre_x, centre_y, top, bottom) of the big green primary button.
+
+    Returns None when no unambiguous green button is on screen. The bbox is
+    needed because the button can extend into the bottom safe-area /
+    home-gesture zone, where a centroid tap gets swallowed (run 5).
+    """
     from PIL import Image
 
     im = Image.open(path).convert("RGB")
     w, h = im.size
+    px = im.load()
     scale = h / float(device_h)
     pts = []
     for yy in range(int(y_from * scale), h, 2):
         for xx in range(0, w, 2):
-            r, g, b = im.getpixel((xx, yy))
+            r, g, b = px[xx, yy]
             if g > 90 and g > r * 1.35 and g > b * 1.25:
                 pts.append((xx, yy))
     if len(pts) < 500:
         return None
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
-    return (round(sum(xs) / len(xs) / scale, 1), round(sum(ys) / len(ys) / scale, 1))
+    return (round(sum(xs) / len(xs) / scale, 1),
+            round(sum(ys) / len(ys) / scale, 1),
+            round(min(ys) / scale, 1),
+            round(max(ys) / scale, 1))
 
 
 def shot_diff(p1, p2, w=402, h=874):
@@ -350,12 +358,37 @@ def main():
                 found = find_green(shot_path, y_from=450, device_h=args.device_height)
                 if not found:
                     raise RuntimeError("clickgreen: no green button on screen")
-                sx, sy = to_screen(found[0], found[1])
-                run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
-                time.sleep(0.2)
-                run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
-                time.sleep(float(act.get("wait", 1.5)))
-                print(f"[{i}] clickgreen device({found[0]},{found[1]}) -> screen({sx:.0f},{sy:.0f})")
+                cx, cy, top, bottom = found
+                # The button can reach into the bottom safe-area / home-gesture
+                # zone. Run 5 tapped the centroid of an 824..873pt button
+                # (y=848): the tap never fired connect() - no HUD, no alert, no
+                # network - and the email field silently took focus instead.
+                # Tap progressively higher inside the button and verify the
+                # screen actually reacts; a real tap produces a HUD/alert/
+                # navigation, a swallowed one changes nothing.
+                pre = device_shot(os.path.join(args.out, "green-pre.png"))
+                tried = []
+                fired = False
+                for frac in (0.12, 0.3, 0.5):
+                    dy = int(round(top + (bottom - top) * frac))
+                    if any(abs(dy - t) < 4 for t in tried):
+                        continue
+                    tried.append(dy)
+                    sx, sy = to_screen(cx, dy)
+                    run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                    time.sleep(0.2)
+                    run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                    time.sleep(float(act.get("wait", 2.0)))
+                    post = device_shot(os.path.join(args.out, "green-post.png"))
+                    d = shot_diff(pre, post)
+                    print(f"[{i}] clickgreen tap y={dy} -> screen({sx:.0f},{sy:.0f}) diff={d:.2f}")
+                    if d > 3.0:
+                        fired = True
+                        break
+                if not fired:
+                    raise RuntimeError(
+                        f"clickgreen: no screen reaction after taps at y={tried} "
+                        f"(button spans {top}..{bottom}, centroid {cy})")
             elif kind == "clicklastrow":
                 # Click the LAST text row detected on screen. On the FlowCrypt
                 # welcome screen that is the "Other email provider" button, and
