@@ -227,38 +227,13 @@ jobs:
             --console-log "$OUT/console-old-login.log" \
             --imap-log /tmp/mock_mail/imap.log --smtp-log /tmp/mock_mail/smtp.log
 
-      - name: Post-run diagnostics
-        if: always()
-        run: |
-          set -uo pipefail
-          UDID='${{ steps.sim.outputs.udid }}'
-          xcrun simctl io "$UDID" screenshot "$OUT/after-actions-device.png" || true
-          screencapture -x "$OUT/after-actions-desktop.png" || true
-          echo "--- frontmost app ---"
-          osascript -e 'tell application "System Events" to get name of every process whose frontmost is true' || true
-          echo "--- simulator window rect ---"
-          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1' || true
-          echo "--- app process ---"
-          APP_PID=$(pgrep -f "FlowCrypt.app/FlowCrypt" | head -1)
-          if [ -n "$APP_PID" ]; then
-            echo "app pid=$APP_PID alive"
-            sample "$APP_PID" 3 -file "$OUT/app-sample.txt" || true
-            grep -aE "FlowCrypt|mach_msg|JSContext|realm|Core" "$OUT/app-sample.txt" 2>/dev/null | head -25 || true
-          else
-            echo "APP PROCESS NOT FOUND (crashed or exited)"
-          fi
-          echo "--- recent crash reports ---"
-          ls -lt "$HOME/Library/Logs/DiagnosticReports/" 2>/dev/null | head -6 || true
-          cp "$HOME"/Library/Logs/DiagnosticReports/FlowCrypt*.ips "$OUT/" 2>/dev/null || true
-          echo "--- render server / simulator faults (last 10m) ---"
-          log show --last 10m --predicate 'process CONTAINS "backboardd" OR process CONTAINS "Simulator" OR sender CONTAINS "CoreAnimation"' --style compact 2>/dev/null | grep -aiE "fault|error|hang|stall" | tail -20 || true
-          echo "--- console tail ---"
-          tail -5 "$OUT/console-old-login.log" || true
-
       - name: Stop video recording
         if: always()
         run: |
           set -uo pipefail
+          # Stop the recording the moment the driver is done: a video that
+          # keeps rolling through the diagnostics steps ends in a static
+          # tail that the liveness check cannot tell apart from a freeze.
           for helper in caffeinate keepalive; do
             if [ -f "$OUT/$helper.pid" ]; then
               PID=$(cat "$OUT/$helper.pid")
@@ -286,6 +261,34 @@ jobs:
           # where the bug is, so it must never be uploaded as evidence.
           command -v ffmpeg >/dev/null || brew install ffmpeg 2>&1 | tail -2
           python3 poc/scripts/check_video_liveness.py "$OUT/demo-1-login.mp4" --fps 2
+
+      - name: Post-run diagnostics
+        if: always()
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          xcrun simctl io "$UDID" screenshot "$OUT/after-actions-device.png" || true
+          screencapture -x "$OUT/after-actions-desktop.png" || true
+          echo "--- frontmost app ---"
+          osascript -e 'tell application "System Events" to get name of every process whose frontmost is true' || true
+          echo "--- simulator window rect ---"
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1' || true
+          echo "--- app process ---"
+          APP_PID=$(pgrep -f "FlowCrypt.app/FlowCrypt" | head -1)
+          if [ -n "$APP_PID" ]; then
+            echo "app pid=$APP_PID alive"
+            sample "$APP_PID" 3 -file "$OUT/app-sample.txt" || true
+            grep -aE "FlowCrypt|mach_msg|JSContext|realm|Core" "$OUT/app-sample.txt" 2>/dev/null | head -25 || true
+          else
+            echo "APP PROCESS NOT FOUND (crashed or exited)"
+          fi
+          echo "--- recent crash reports ---"
+          ls -lt "$HOME/Library/Logs/DiagnosticReports/" 2>/dev/null | head -6 || true
+          cp "$HOME"/Library/Logs/DiagnosticReports/FlowCrypt*.ips "$OUT/" 2>/dev/null || true
+          echo "--- render server / simulator faults (last 10m) ---"
+          log show --last 10m --predicate 'process CONTAINS "backboardd" OR process CONTAINS "Simulator" OR sender CONTAINS "CoreAnimation"' --style compact 2>/dev/null | grep -aiE "fault|error|hang|stall" | tail -20 || true
+          echo "--- console tail ---"
+          tail -5 "$OUT/console-old-login.log" || true
 
       - name: Collect evidence
         if: always()

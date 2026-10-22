@@ -272,8 +272,24 @@ def main():
                 # Typing needs the field to be focused; cliclick already clicked.
                 text = act["text"]
                 osa(f'tell application "System Events" to keystroke "{text}"')
+                # osa keystroke is fire-and-forget: characters keep trickling in
+                # at ~0.4s/char long after the call returns. Proceeding to the
+                # next click mid-trickle once let the email field's reload race
+                # wipe the username field down to "poc". Wait for the trickle.
+                settle = max(float(act.get("wait", 0.6)), 0.6 * len(text))
+                time.sleep(settle)
+                print(f"[{i}] type {len(text)} chars (settled {settle:.1f}s)")
+            elif kind == "clearfield":
+                # Select-all + delete in the focused field. The SetupImap form
+                # auto-fills username and both server hostnames from the email
+                # as it is typed (updateForEmailChanges -> reloadRows), so a
+                # bare type appends and produces "imap.mockmail.testimap...".
+                focus_simulator()
+                osa('tell application "System Events" to keystroke "a" using command down')
+                time.sleep(0.4)
+                osa('tell application "System Events" to key code 51')
                 time.sleep(float(act.get("wait", 0.6)))
-                print(f"[{i}] type {len(text)} chars")
+                print(f"[{i}] clearfield (cmd+A, delete)")
             elif kind == "key":
                 focus_simulator()
                 osa(f'tell application "System Events" to key code {int(act["code"])}')
@@ -317,7 +333,11 @@ def main():
                 print(f"[{i}] clickrow {n} device(201,{dy}) -> screen({sx:.0f},{sy:.0f})")
             elif kind == "clickgreen":
                 shot_path = device_shot(os.path.join(args.out, "green.png"))
-                found = find_green(shot_path, device_h=args.device_height)
+                # y_from=450: after the form scrolls, Connect can sit as high
+                # as mid-screen; the green nav bar at the top ends by y=130,
+                # and the small green "Done" text never reaches the 500px
+                # pixel-count floor, so 450 is still unambiguous.
+                found = find_green(shot_path, y_from=450, device_h=args.device_height)
                 if not found:
                     raise RuntimeError("clickgreen: no green button on screen")
                 sx, sy = to_screen(found[0], found[1])
