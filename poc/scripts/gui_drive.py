@@ -234,7 +234,7 @@ def find_security_rows(path, device_h=874):
 
     Returns (securities, ports): securities is a list of (y_center, kind)
     with kind in {"tls", "none"} sorted by y (upper = IMAP, lower = SMTP);
-    ports is the list of port-row y centres (upper = 993, lower = 465).
+    ports is the list of port-row y centres (informational).
 
     Two passes: first find text bands (rows whose dark-pixel count clears
     a floor - "tls" is thin and only reaches ~18 dark samples at its
@@ -246,26 +246,48 @@ def find_security_rows(path, device_h=874):
         "none" 4 runs, width ~33   (x 17-50)
         "993"  3 runs, width ~27   -> port
         "465"  3 runs, width ~27   -> port
-        "poc"  3 runs, width ~24   -> username, excluded by y > 320
 
-    Width bands overlap between "none" and the ports, so the run count
-    carries the decision: none needs >= 4 runs, tls needs <= 3 with a
-    narrow width. A "starttls" value (~7 runs, width ~45) matches
-    nothing on purpose - it would mean the picker was mis-tapped and the
-    caller must fail loudly rather than silently "succeed".
+    Two traps this avoids, both hit for real in run 1 of the fix:
+
+    - The picker's toolbar "Done" is BLUE (0,122,255): in luminance it
+      reads as dark and its 4 glyphs mimic "none" (4 runs, w~39). The
+      dark-pixel test therefore uses max(r,g,b) < 150, which blue fails.
+    - The picker wheel itself renders none/tls/startls rows on its own
+      gray background. A band only counts when its background is white
+      (form rows), so picker rows are skipped even when the wheel is
+      open and the form has scrolled under it.
+
+    A "starttls" value (~7 runs, width ~45) matches nothing on purpose -
+    it would mean the picker was mis-tapped and the caller must fail
+    loudly rather than silently "succeed".
     """
     from PIL import Image
 
-    im = Image.open(path).convert("L")
+    im = Image.open(path).convert("RGB")
     w, h = im.size
     px = im.load()
     scale = h / float(device_h)
     x_limit = int(388 * scale)
 
+    def is_dark(xx, yy):
+        r, g, b = px[xx, yy]
+        return max(r, g, b) < 150
+
+    def bg_is_white(yc):
+        # sample between text runs; form rows sit on white, picker rows
+        # on the wheel gray (209,212,217), the toggle on (229,229,229)
+        for xx_pt in (300, 330, 360):
+            xx = int(xx_pt * scale)
+            if 0 <= xx < w and 0 <= yc < h:
+                r, g, b = px[xx, yc]
+                if min(r, g, b) < 230:
+                    return False
+        return True
+
     # pass 1: text bands
     bands, start = [], None
     for yy in range(int(100 * scale), int(845 * scale)):
-        dark = sum(1 for xx in range(0, x_limit, 2) if px[xx, yy] < 150)
+        dark = sum(1 for xx in range(0, x_limit, 2) if is_dark(xx, yy))
         if dark >= 3 and start is None:
             start = yy
         elif dark < 3 and start is not None:
@@ -286,7 +308,7 @@ def find_security_rows(path, device_h=874):
         cols = []
         for xx in range(0, x_limit):
             dark = sum(1 for yy in range(max(0, yc - band), min(h, yc + band))
-                       if px[xx, yy] < 150)
+                       if is_dark(xx, yy))
             cols.append(dark >= 2)
         out, start = [], None
         for xx, d in enumerate(cols):
@@ -303,6 +325,8 @@ def find_security_rows(path, device_h=874):
     securities, ports = [], []
     for a, b in merged:
         yc = (a + b) // 2
+        if not bg_is_white(yc):
+            continue
         r = runs_at(yc)
         if not r:
             continue
@@ -316,9 +340,9 @@ def find_security_rows(path, device_h=874):
             securities.append((yc_pt, "none"))
         elif n <= 3 and 8 <= width <= 22:
             securities.append((yc_pt, "tls"))
-        elif n == 3 and 20 <= width <= 34 and yc_pt > 320:
+        elif n == 3 and 20 <= width <= 34 and yc_pt > 150:
             ports.append(yc_pt)
-    # collapse duplicates from split bands
+
     def collapse(items):
         out = []
         for it in sorted(items):
@@ -330,12 +354,15 @@ def find_security_rows(path, device_h=874):
 
 
 def find_blue_done(path, device_h=874):
-    """(x, y) of the blue Done button in the bottom toolbar, or None.
+    """(x, y) of the blue Done button, or None.
 
-    The picker's inputAccessoryView is a 40pt UIToolbar anchored to the
-    bottom of the screen with a left-aligned .done item, so the blue text
-    sits around (35, 854). Detected live because a hardcoded tap once
-    sailed past a toolbar that the safe-area inset had shifted.
+    The Done sits in the field's inputAccessoryView toolbar, whose
+    position DEPENDS on what is up: with the picker open the toolbar
+    rides above the wheel (~y 650, wheel at 674+); with a keyboard up
+    it is anchored to the screen bottom (~y 854). A hardcoded bottom
+    tap once sailed into the wheel and selected "startls" - so scan the
+    whole screen and take the LARGEST blue cluster (the Done text is
+    ~700 samples; a text cursor is ~90).
     """
     from PIL import Image
 
@@ -344,15 +371,33 @@ def find_blue_done(path, device_h=874):
     px = im.load()
     scale = h / float(device_h)
     pts = []
-    for yy in range(int(815 * scale), h):
-        for xx in range(0, int(200 * scale), 2):
+    for yy in range(0, h):
+        for xx in range(0, w, 2):
             r, g, b = px[xx, yy]
             if b > 120 and b > r * 1.3 and b > g * 1.1:
                 pts.append((xx, yy))
     if len(pts) < 12:
         return None
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
+    # cluster by y (gap > 30pt splits clusters)
+    pts.sort(key=lambda p: p[1])
+    clusters, cur = [], [pts[0]]
+    for p in pts[1:]:
+        if p[1] - cur[-1][1] > int(30 * scale):
+            clusters.append(cur)
+            cur = [p]
+        else:
+            cur.append(p)
+    clusters.append(cur)
+    biggest = max(clusters, key=len)
+    if len(biggest) < 100:
+        return None
+    xs = [p[0] for p in biggest]
+    ys = [p[1] for p in biggest]
+    # the Done text spans ~40pt; a blinking text caret is ~2pt wide and
+    # would otherwise pass as the largest blue cluster when no toolbar
+    # is on screen
+    if (max(xs) - min(xs)) / scale < 20:
+        return None
     return (round(sum(xs) / len(xs) / scale, 1),
             round(sum(ys) / len(ys) / scale, 1))
 
@@ -597,7 +642,12 @@ def main():
                         continue
                     done_pt = find_blue_done(post, device_h=args.device_height)
                     if done_pt is None:
-                        done_pt = (35.0, 854.0)
+                        # never tap a hardcoded fallback here: run 1's
+                        # (35,854) fallback sailed into the wheel and
+                        # selected "startls". No Done found = try again.
+                        say(f"[{i}] {tag}: picker open but no Done found; "
+                            f"retrying")
+                        continue
                     sx, sy = to_screen(done_pt[0], done_pt[1])
                     run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
                     time.sleep(0.2)
@@ -629,44 +679,57 @@ def main():
                         f"cycles - refusing to continue with a TLS connect "
                         f"that would tear the session down before any "
                         f"command and log zero credentials")
-            elif kind == "dismiss_keyboard":
-                # Hide the software keyboard if it is up - VERIFIED via the
-                # Connect button becoming visible, never a blind cmd+K
-                # toggle (toggling a hidden keyboard back ON would cover
-                # the form bottom and break the next tap).
+            elif kind == "clear_input":
+                # Clear whatever input UI is up (picker wheel and/or
+                # keyboard) and PROVE the form bottom is visible again.
                 #
-                # Why this exists: adjustForKeyboard only grows the table's
-                # bottom contentInset - it does not scroll - so with the
-                # keyboard up the bottom form rows (SMTP security at
-                # y~736, Connect at y~800) sit BEHIND it and taps there
-                # hit keys instead of rows. Run fix2's "swallowed"
-                # clickrow 12 was exactly this: the tap landed on the
-                # keyboard that was still up from typing the password.
+                # Two distinct states, told apart by where the blue Done
+                # sits (find_blue_done, largest blue cluster):
+                #   picker open -> toolbar rides above the wheel (~y 650),
+                #                  form scrolled, Connect still visible
+                #   keyboard up -> toolbar anchored to the screen bottom
+                #                  (~y 854), Connect covered
                 #
-                # The picker's Done also leaves focus on the next field
-                # (IMAP security Done -> SMTP server -> keyboard up), so
-                # this runs after every step that can raise a keyboard.
-                tries = int(act.get("tries", 3))
+                # Never a blind cmd+K: toggling a hidden keyboard back ON
+                # would cover the form bottom and break the next tap.
+                # Run 1 of the fix left a picker open (its Done tap had
+                # sailed into the wheel and selected "startls"), and every
+                # later probe then read the wheel instead of the form.
+                tries = int(act.get("tries", 4))
                 cleared = False
                 for attempt in range(1, tries + 1):
                     probe = device_shot(
-                        os.path.join(args.out, f"kbd-{attempt}.png"))
+                        os.path.join(args.out, f"clear-{attempt}.png"))
+                    done_pt = find_blue_done(probe, device_h=args.device_height)
                     green = find_green(probe, y_from=450,
                                        device_h=args.device_height)
-                    say(f"[{i}] dismiss_keyboard attempt {attempt}: green={green}")
-                    if green:
-                        say(f"[{i}] dismiss_keyboard: form bottom visible, "
-                            f"no keyboard covering it")
+                    say(f"[{i}] clear_input attempt {attempt}: "
+                        f"done={done_pt} green={green}")
+                    if green and (done_pt is None or done_pt[1] > 780):
+                        say(f"[{i}] clear_input: form bottom visible, "
+                            f"input cleared")
                         cleared = True
                         break
+                    if done_pt is not None and done_pt[1] < 780:
+                        # picker open: Done commits the selection and
+                        # either endEdits or moves focus to the next
+                        # field (which raises the keyboard - next round)
+                        sx, sy = to_screen(done_pt[0], done_pt[1])
+                        run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                        time.sleep(0.2)
+                        run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                        time.sleep(float(act.get("wait", 1.5)))
+                        continue
+                    # keyboard up (Connect covered): hide it, verified
+                    # by the next round's green check
                     focus_simulator()
                     osa('tell application "System Events" to keystroke "k" '
                         'using command down')
                     time.sleep(float(act.get("wait", 1.5)))
                 if not cleared:
                     raise RuntimeError(
-                        "dismiss_keyboard: Connect button never became "
-                        "visible - keyboard still covering the form bottom")
+                        "clear_input: form bottom never became visible - "
+                        "input UI still covering it")
             elif kind == "clicklastrow":
                 # Click the LAST text row detected on screen. On the FlowCrypt
                 # welcome screen that is the "Other email provider" button, and
