@@ -152,6 +152,28 @@ jobs:
           xcrun simctl keychain "$UDID" add-root-cert "$OUT/certs/ca.pem"
           echo "root CA installed"
 
+      - name: Restart simulator so the root CA is trusted
+        run: |
+          set -euo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
+          # trustd snapshots the trust store at boot: a root cert added to a
+          # RUNNING simulator is NOT trusted by SecTrustEvaluate. Observed on
+          # the iOS 18.6 image: the TLS handshake completes, the IMAP greeting
+          # arrives and is logged by the app, then MailCore's
+          # checkCertificate() fails and the session is torn down before a
+          # single command is sent (imap.log: connect -> disconnect, zero
+          # recv lines). A reboot after add-root-cert fixes it.
+          xcrun simctl shutdown "$UDID" || true
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          # Simulator.app can reset the window across a reboot; re-normalise.
+          osascript -e 'tell application "Simulator" to activate' || true
+          osascript -e 'tell application "System Events" to tell process "Simulator" to set position of window 1 to {80, 40}' || true
+          osascript -e 'tell application "System Events" to keystroke "2" using command down' || true
+          sleep 8
+          echo "--- window rect after reboot ---"
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1'
+
       - name: Point the mock hostnames at localhost
         run: |
           set -euo pipefail
