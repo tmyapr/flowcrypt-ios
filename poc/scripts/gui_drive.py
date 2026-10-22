@@ -550,6 +550,31 @@ def main():
                         f"in {args.smtp_log}")
                 except OSError:
                     pass
+            elif kind == "expect_smtp_auth":
+                # Stage A gate. The sign-in flow only *connects* the IMAP
+                # session (connectOperation sends no command); the first
+                # credential transmission is the SMTP loginOperation, which
+                # speaks AUTH LOGIN. The mock decodes and logs it, and the
+                # app's own console logs the same exchange. The IMAP LOGIN
+                # itself only fires on the first mailbox sync (after key
+                # setup) - that is stage B.
+                email = act.get("email", "poc@yahoo.com")
+                txt = ""
+                try:
+                    with open(args.smtp_log) as fh:
+                        txt = fh.read()
+                except OSError as exc:
+                    raise RuntimeError(f"expect_smtp_auth: cannot read {args.smtp_log}: {exc}")
+                hits = [ln for ln in txt.splitlines()
+                        if ("auth_username" in ln or "auth_password" in ln
+                            or "auth_plain" in ln) and email in ln]
+                say(f"[{i}] expect_smtp_auth: {len(hits)} credential line(s) in {args.smtp_log}")
+                for ln in hits[-4:]:
+                    say(f"    {ln[:240]}")
+                if not hits:
+                    raise RuntimeError(
+                        f"expect_smtp_auth: no SMTP AUTH credential for {email} in "
+                        f"{args.smtp_log} - credentials never reached the mock server")
             elif kind == "devshot":
                 path = os.path.join(args.out, act["name"] + ".png")
                 device_shot(path)

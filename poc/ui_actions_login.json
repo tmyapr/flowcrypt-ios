@@ -39,6 +39,46 @@
   },
 
   {
+    "do": "clickrow",
+    "row": 8,
+    "wait": 1.5
+  },
+  {
+    "do": "shot",
+    "name": "login-02a-imap-security"
+  },
+  {
+    "do": "click",
+    "x": 50,
+    "y": 654,
+    "wait": 1.5
+  },
+  {
+    "do": "shot",
+    "name": "login-02b-after-done"
+  },
+
+  {
+    "do": "clickrow",
+    "row": 12,
+    "wait": 1.5
+  },
+  {
+    "do": "shot",
+    "name": "login-02c-smtp-security"
+  },
+  {
+    "do": "click",
+    "x": 50,
+    "y": 654,
+    "wait": 1.5
+  },
+  {
+    "do": "shot",
+    "name": "login-02d-dismissed"
+  },
+
+  {
     "do": "shot",
     "name": "login-02-filled"
   },
@@ -57,14 +97,18 @@
   },
   {
     "do": "sleep",
-    "seconds": 20
+    "seconds": 25
   },
   {
     "do": "shot",
     "name": "login-03-after-connect"
   },
   {
-    "do": "expect_login",
+    "do": "devshot",
+    "name": "after-connect-device"
+  },
+  {
+    "do": "expect_smtp_auth",
     "email": "poc@yahoo.com"
   },
   {

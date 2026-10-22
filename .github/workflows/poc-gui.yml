@@ -342,7 +342,7 @@ jobs:
             grep -aiE "LOGIN |AUTH (LOGIN|PLAIN)|password" "$OUT/console-old-login.log" 2>/dev/null | head -20 || echo "(none yet)"
             echo
             echo "== PROOF: credentials seen by the mock servers =="
-            grep -aiE "LOGIN|auth_plain|auth_login" /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log 2>/dev/null | head -20 || echo "(none yet)"
+            grep -aiE "LOGIN|auth_username|auth_password|auth_plain" /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log 2>/dev/null | head -20 || echo "(none yet)"
           } | tee "$OUT/SUMMARY.txt"
 
       - name: Gate - credentials must be in the mock logs
@@ -356,12 +356,24 @@ jobs:
           # The whole PoC is this line: the app transmitted the password in
           # the clear and the server wrote it down. Video and screenshots are
           # corroboration; without this receipt there is no finding.
-          if ! grep -a "LOGIN" /tmp/mock_mail/imap.log 2>/dev/null | grep -aq "$POC_EMAIL"; then
-            echo "::error::No cleartext IMAP LOGIN for $POC_EMAIL in the mock server log - the PoC did not happen"
+          #
+          # Two possible receipts, in the order they occur:
+          #   1. SMTP AUTH LOGIN - sent by the sign-in flow itself
+          #      (connectSmtp -> loginOperation), so it is the stage A proof.
+          #   2. IMAP LOGIN - connectOperation sends no command; the IMAP
+          #      LOGIN only fires on the first mailbox sync after key setup
+          #      (stage B), and again on every reconnect of a saved account
+          #      (the upgrade leg).
+          if grep -a "LOGIN" /tmp/mock_mail/imap.log 2>/dev/null | grep -aq "$POC_EMAIL"; then
+            echo "POC CONFIRMED: cleartext IMAP LOGIN captured by the mock server"
+            grep -a "LOGIN" /tmp/mock_mail/imap.log | tail -3
+          elif grep -a "auth_username" /tmp/mock_mail/smtp.log 2>/dev/null | grep -aq "$POC_EMAIL"; then
+            echo "POC CONFIRMED: cleartext SMTP AUTH LOGIN captured by the mock server"
+            grep -a "auth_" /tmp/mock_mail/smtp.log | tail -4
+          else
+            echo "::error::No cleartext credential transmission for $POC_EMAIL in the mock logs - the PoC did not happen"
             exit 1
           fi
-          echo "POC CONFIRMED: cleartext IMAP LOGIN captured by the mock server"
-          grep -a "LOGIN" /tmp/mock_mail/imap.log | tail -3
 
       - name: Upload evidence
         if: always()
