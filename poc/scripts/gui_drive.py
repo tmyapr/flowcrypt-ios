@@ -229,6 +229,134 @@ def find_green(path, y_from=500, device_h=874):
             round(max(ys) / scale, 1))
 
 
+def find_security_rows(path, device_h=874):
+    """Locate the Security-type rows in a SetupImap form screenshot.
+
+    Returns (securities, ports): securities is a list of (y_center, kind)
+    with kind in {"tls", "none"} sorted by y (upper = IMAP, lower = SMTP);
+    ports is the list of port-row y centres (upper = 993, lower = 465).
+
+    Two passes: first find text bands (rows whose dark-pixel count clears
+    a floor - "tls" is thin and only reaches ~18 dark samples at its
+    centre, so the floor is 3), then classify each band centre by glyph
+    signature measured on real device shots of this exact form (values
+    are left-aligned at x~16):
+
+        "tls"  3 runs, width ~15   (x 16-32)
+        "none" 4 runs, width ~33   (x 17-50)
+        "993"  3 runs, width ~27   -> port
+        "465"  3 runs, width ~27   -> port
+        "poc"  3 runs, width ~24   -> username, excluded by y > 320
+
+    Width bands overlap between "none" and the ports, so the run count
+    carries the decision: none needs >= 4 runs, tls needs <= 3 with a
+    narrow width. A "starttls" value (~7 runs, width ~45) matches
+    nothing on purpose - it would mean the picker was mis-tapped and the
+    caller must fail loudly rather than silently "succeed".
+    """
+    from PIL import Image
+
+    im = Image.open(path).convert("L")
+    w, h = im.size
+    px = im.load()
+    scale = h / float(device_h)
+    x_limit = int(388 * scale)
+
+    # pass 1: text bands
+    bands, start = [], None
+    for yy in range(int(100 * scale), int(845 * scale)):
+        dark = sum(1 for xx in range(0, x_limit, 2) if px[xx, yy] < 150)
+        if dark >= 3 and start is None:
+            start = yy
+        elif dark < 3 and start is not None:
+            if yy - start >= 4:
+                bands.append((start, yy))
+            start = None
+    if start is not None:
+        bands.append((start, int(845 * scale)))
+    merged = []
+    for a, b in bands:
+        if merged and a - merged[-1][1] < int(8 * scale):
+            merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+
+    def runs_at(yc):
+        band = int(5 * scale)
+        cols = []
+        for xx in range(0, x_limit):
+            dark = sum(1 for yy in range(max(0, yc - band), min(h, yc + band))
+                       if px[xx, yy] < 150)
+            cols.append(dark >= 2)
+        out, start = [], None
+        for xx, d in enumerate(cols):
+            if d and start is None:
+                start = xx
+            elif not d and start is not None:
+                if xx - start >= int(2 * scale):
+                    out.append((start / scale, xx / scale))
+                start = None
+        if start is not None:
+            out.append((start / scale, 388.0))
+        return out
+
+    securities, ports = [], []
+    for a, b in merged:
+        yc = (a + b) // 2
+        r = runs_at(yc)
+        if not r:
+            continue
+        x0, x1 = r[0][0], r[-1][1]
+        width = x1 - x0
+        yc_pt = round(yc / scale, 1)
+        if x0 > 60:
+            continue
+        n = len(r)
+        if n >= 4 and 24 <= width <= 42:
+            securities.append((yc_pt, "none"))
+        elif n <= 3 and 8 <= width <= 22:
+            securities.append((yc_pt, "tls"))
+        elif n == 3 and 20 <= width <= 34 and yc_pt > 320:
+            ports.append(yc_pt)
+    # collapse duplicates from split bands
+    def collapse(items):
+        out = []
+        for it in sorted(items):
+            if out and it[0] - out[-1][0] < 25:
+                continue
+            out.append(it)
+        return out
+    return collapse(securities), sorted(set(ports))
+
+
+def find_blue_done(path, device_h=874):
+    """(x, y) of the blue Done button in the bottom toolbar, or None.
+
+    The picker's inputAccessoryView is a 40pt UIToolbar anchored to the
+    bottom of the screen with a left-aligned .done item, so the blue text
+    sits around (35, 854). Detected live because a hardcoded tap once
+    sailed past a toolbar that the safe-area inset had shifted.
+    """
+    from PIL import Image
+
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    px = im.load()
+    scale = h / float(device_h)
+    pts = []
+    for yy in range(int(815 * scale), h):
+        for xx in range(0, int(200 * scale), 2):
+            r, g, b = px[xx, yy]
+            if b > 120 and b > r * 1.3 and b > g * 1.1:
+                pts.append((xx, yy))
+    if len(pts) < 12:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (round(sum(xs) / len(xs) / scale, 1),
+            round(sum(ys) / len(ys) / scale, 1))
+
+
 def shot_diff(p1, p2, w=402, h=874):
     """Mean absolute luminance difference between two screenshots."""
     from PIL import Image
@@ -389,6 +517,156 @@ def main():
                     raise RuntimeError(
                         f"clickgreen: no screen reaction after taps at y={tried} "
                         f"(button spans {top}..{bottom}, centroid {cy})")
+            elif kind == "clicksecurity":
+                # Set a Security-type row to "none" - verified, never blind.
+                #
+                # Root cause this fixes (run fix2): a bare clickrow on the
+                # security row is silently swallowed when the form is
+                # scrolled or a keyboard is up (the caret stays in the
+                # previous field). IMAP security then stays "tls", the app
+                # connects with TLS, MailCore's checkCertificate() fails
+                # against the mock's self-signed cert, and the session is
+                # torn down before a single command - zero credentials in
+                # the mock log, however good the video looks.
+                #
+                # The app does the useful half by itself:
+                # SetupImapViewController sets connectionType =
+                # connections[0] (.none) on didBeginEditing, so merely
+                # OPENING the picker selects "none"; the toolbar Done
+                # commits it via didEndEditing -> updateUser*Credentials
+                # + section reload. This action therefore only has to
+                # (1) tap the right row and PROVE the picker opened
+                # (screen diff), retrying at other offsets when the tap
+                # is swallowed; (2) tap Done; (3) PROVE the row now
+                # reads "none" by glyph signature. Anything less fails
+                # the run loudly instead of shipping a fake success.
+                which = act.get("which", "imap")
+                tag = f"clicksecurity({which})"
+                cycles = int(act.get("cycles", 3))
+                settled = False
+                for cycle in range(1, cycles + 1):
+                    probe = device_shot(
+                        os.path.join(args.out, f"sec-{which}-{cycle}-probe.png"))
+                    secs, ports = find_security_rows(
+                        probe, device_h=args.device_height)
+                    say(f"[{i}] {tag} cycle {cycle}: securities={secs} ports={ports}")
+                    if not secs:
+                        say(f"[{i}] {tag}: no security row on screen, retrying")
+                        time.sleep(2.0)
+                        continue
+                    if len(secs) >= 2:
+                        target = secs[0] if which == "imap" else secs[-1]
+                    else:
+                        # only one security row visible (the other can sit
+                        # behind the keyboard): the IMAP security row is
+                        # always in the upper form (~y 470), the SMTP one
+                        # in the lower (~y 690) - 220pt apart, so a cut at
+                        # 600 survives any scroll shift
+                        only = secs[0]
+                        is_imap_row = only[0] < 600
+                        if (which == "imap") != is_imap_row:
+                            say(f"[{i}] {tag}: only {only} visible but it is "
+                                f"the {'IMAP' if is_imap_row else 'SMTP'} "
+                                f"row; retrying")
+                            time.sleep(2.0)
+                            continue
+                        target = only
+                    ty, kind_now = target
+                    if kind_now == "none":
+                        say(f"[{i}] {tag}: already none at y={ty}")
+                        settled = True
+                        break
+                    pre = device_shot(os.path.join(args.out, f"sec-{which}-{cycle}-pre.png"))
+                    opened = False
+                    for dx, dy_off in ((201, 0), (170, 0), (240, 0), (201, -10), (201, 10)):
+                        sx, sy = to_screen(dx, ty + dy_off)
+                        run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                        time.sleep(0.2)
+                        run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                        time.sleep(float(act.get("picker_wait", 1.2)))
+                        post = device_shot(
+                            os.path.join(args.out, f"sec-{which}-{cycle}-post.png"))
+                        d = shot_diff(pre, post)
+                        say(f"[{i}] {tag} tap device({dx},{ty + dy_off}) "
+                            f"diff={d:.2f}")
+                        if d > 2.0:
+                            opened = True
+                            break
+                    if not opened:
+                        say(f"[{i}] {tag}: picker never opened this cycle")
+                        continue
+                    done_pt = find_blue_done(post, device_h=args.device_height)
+                    if done_pt is None:
+                        done_pt = (35.0, 854.0)
+                    sx, sy = to_screen(done_pt[0], done_pt[1])
+                    run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                    time.sleep(0.2)
+                    run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
+                    time.sleep(float(act.get("done_wait", 1.8)))
+                    verify = device_shot(
+                        os.path.join(args.out, f"sec-{which}-{cycle}-verify.png"))
+                    secs2, _ = find_security_rows(verify, device_h=args.device_height)
+                    say(f"[{i}] {tag} after Done: securities={secs2}")
+                    if not secs2:
+                        continue
+                    if len(secs2) >= 2:
+                        t2 = secs2[0] if which == "imap" else secs2[-1]
+                    else:
+                        # same upper/lower cut as the probe: with the
+                        # keyboard up after Done only one row stays visible
+                        t2 = secs2[0]
+                        if ((which == "imap") != (t2[0] < 600)):
+                            say(f"[{i}] {tag}: verify saw only {t2}, wrong row")
+                            continue
+                    if t2[1] == "none":
+                        say(f"[{i}] {tag}: SETTLED none at y={t2[0]}")
+                        settled = True
+                        break
+                    say(f"[{i}] {tag}: still {t2[1]} at y={t2[0]}, retrying")
+                if not settled:
+                    raise RuntimeError(
+                        f"{tag}: could not set security to none in {cycles} "
+                        f"cycles - refusing to continue with a TLS connect "
+                        f"that would tear the session down before any "
+                        f"command and log zero credentials")
+            elif kind == "dismiss_keyboard":
+                # Hide the software keyboard if it is up - VERIFIED via the
+                # Connect button becoming visible, never a blind cmd+K
+                # toggle (toggling a hidden keyboard back ON would cover
+                # the form bottom and break the next tap).
+                #
+                # Why this exists: adjustForKeyboard only grows the table's
+                # bottom contentInset - it does not scroll - so with the
+                # keyboard up the bottom form rows (SMTP security at
+                # y~736, Connect at y~800) sit BEHIND it and taps there
+                # hit keys instead of rows. Run fix2's "swallowed"
+                # clickrow 12 was exactly this: the tap landed on the
+                # keyboard that was still up from typing the password.
+                #
+                # The picker's Done also leaves focus on the next field
+                # (IMAP security Done -> SMTP server -> keyboard up), so
+                # this runs after every step that can raise a keyboard.
+                tries = int(act.get("tries", 3))
+                cleared = False
+                for attempt in range(1, tries + 1):
+                    probe = device_shot(
+                        os.path.join(args.out, f"kbd-{attempt}.png"))
+                    green = find_green(probe, y_from=450,
+                                       device_h=args.device_height)
+                    say(f"[{i}] dismiss_keyboard attempt {attempt}: green={green}")
+                    if green:
+                        say(f"[{i}] dismiss_keyboard: form bottom visible, "
+                            f"no keyboard covering it")
+                        cleared = True
+                        break
+                    focus_simulator()
+                    osa('tell application "System Events" to keystroke "k" '
+                        'using command down')
+                    time.sleep(float(act.get("wait", 1.5)))
+                if not cleared:
+                    raise RuntimeError(
+                        "dismiss_keyboard: Connect button never became "
+                        "visible - keyboard still covering the form bottom")
             elif kind == "clicklastrow":
                 # Click the LAST text row detected on screen. On the FlowCrypt
                 # welcome screen that is the "Other email provider" button, and

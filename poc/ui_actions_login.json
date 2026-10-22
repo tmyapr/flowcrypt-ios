@@ -1,132 +1,27 @@
 [
-  {
-    "do": "liveness"
-  },
-  {
-    "do": "open_provider",
-    "x": 200,
-    "y": 629,
-    "timeout": 200,
-    "per_try": 30
-  },
-  {
-    "do": "shot",
-    "name": "login-01-form"
-  },
-  {
-    "do": "devshot",
-    "name": "baseline-empty"
-  },
-
-  {
-    "do": "clickrow",
-    "row": 2,
-    "wait": 1.0
-  },
-  {
-    "do": "type",
-    "text": "poc@yahoo.com",
-    "wait": 15.0
-  },
-  {
-    "do": "sleep",
-    "seconds": 5
-  },
-
-  {
-    "do": "clickrow",
-    "row": 4,
-    "wait": 1.0
-  },
-  {
-    "do": "type",
-    "text": "PocPassw0rd!",
-    "wait": 15.0
-  },
-  {
-    "do": "sleep",
-    "seconds": 5
-  },
-
-  {
-    "do": "clickrow",
-    "row": 12,
-    "wait": 1.5
-  },
-  {
-    "do": "shot",
-    "name": "login-02a-smtp-security"
-  },
-  {
-    "do": "click",
-    "x": 50,
-    "y": 654,
-    "wait": 1.5
-  },
-  {
-    "do": "shot",
-    "name": "login-02b-smtp-done"
-  },
-
-  {
-    "do": "clickrow",
-    "row": 8,
-    "wait": 1.5
-  },
-  {
-    "do": "shot",
-    "name": "login-02c-imap-security"
-  },
-  {
-    "do": "click",
-    "x": 50,
-    "y": 654,
-    "wait": 1.5
-  },
-  {
-    "do": "shot",
-    "name": "login-02d-dismissed"
-  },
-
-  {
-    "do": "shot",
-    "name": "login-02-filled"
-  },
-  {
-    "do": "assert_diff",
-    "ref": "baseline-empty",
-    "min_delta": 1.0
-  },
-  {
-    "do": "devshot",
-    "name": "filled-device"
-  },
-  {
-    "do": "clickgreen",
-    "wait": 4.0
-  },
-  {
-    "do": "sleep",
-    "seconds": 25
-  },
-  {
-    "do": "shot",
-    "name": "login-03-after-connect"
-  },
-  {
-    "do": "devshot",
-    "name": "after-connect-device"
-  },
-  {
-    "do": "expect_smtp_auth",
-    "email": "poc@yahoo.com"
-  },
-  {
-    "do": "shot",
-    "name": "login-04-result"
-  },
-  {
-    "do": "devshot",
-    "name": "final-device"
-  }
+    {"do": "liveness"},
+    {"do": "open_provider", "x": 200, "y": 629, "timeout": 200, "per_try": 30},
+    {"do": "shot", "name": "login-01-form"},
+    {"do": "devshot", "name": "baseline-empty"},
+    {"do": "clickrow", "row": 2, "wait": 1.0},
+    {"do": "type", "text": "poc@yahoo.com", "wait": 15.0},
+    {"do": "sleep", "seconds": 5},
+    {"do": "clickrow", "row": 4, "wait": 1.0},
+    {"do": "type", "text": "PocPassw0rd!", "wait": 15.0},
+    {"do": "sleep", "seconds": 5},
+    {"do": "dismiss_keyboard", "tries": 3},
+    {"do": "clicksecurity", "which": "smtp", "cycles": 3},
+    {"do": "shot", "name": "login-02a-smtp-security"},
+    {"do": "clicksecurity", "which": "imap", "cycles": 3},
+    {"do": "dismiss_keyboard", "tries": 3},
+    {"do": "shot", "name": "login-02b-imap-security"},
+    {"do": "shot", "name": "login-02-filled"},
+    {"do": "devshot", "name": "filled-device"},
+    {"do": "assert_diff", "ref": "baseline-empty", "min_delta": 1.0},
+    {"do": "clickgreen", "wait": 4.0},
+    {"do": "sleep", "seconds": 25},
+    {"do": "shot", "name": "login-03-after-connect"},
+    {"do": "devshot", "name": "after-connect-device"},
+    {"do": "expect_smtp_auth", "email": "poc@yahoo.com"},
+    {"do": "expect_login", "email": "poc@yahoo.com"}
 ]
