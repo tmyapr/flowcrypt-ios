@@ -1,5 +1,6 @@
 [
-  {"do": "open_provider", "x": 200, "y": 629, "timeout": 100, "per_try": 18},
+  {"do": "liveness"},
+  {"do": "open_provider", "x": 200, "y": 629, "timeout": 200, "per_try": 30},
   {"do": "cmdkey", "char": "k", "wait": 1.5},
   {"do": "shot", "name": "login-01-form"},
   {"do": "devshot", "name": "baseline-empty"},
@@ -23,8 +24,9 @@
 
   {"do": "cmdkey", "char": "k", "wait": 1.5},
   {"do": "clickgreen", "wait": 4.0},
-  {"do": "shot", "name": "login-03-after-connect"},
   {"do": "sleep", "seconds": 20},
+  {"do": "shot", "name": "login-03-after-connect"},
+  {"do": "expect_login"},
   {"do": "shot", "name": "login-04-result"},
   {"do": "devshot", "name": "final-device"}
 ]

@@ -124,6 +124,21 @@ jobs:
           echo "--- cliclick sanity ---"
           cliclick m:200,300 && echo "cliclick OK"
 
+      - name: Keep the GUI awake
+        run: |
+          set -uo pipefail
+          # A sleeping display or a backgrounded Simulator window stops
+          # presenting frames: the app keeps running, the console keeps
+          # logging, and the video silently becomes a still image. Run 2
+          # shipped exactly that (88KB for 145 seconds). Pin the display
+          # awake and keep Simulator frontmost for the whole recording.
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0 || true
+          nohup caffeinate -d -i > /dev/null 2>&1 &
+          echo $! > "$OUT/caffeinate.pid"
+          nohup bash -c 'while true; do osascript -e "tell application \"Simulator\" to activate" 2>/dev/null; sleep 3; done' > /dev/null 2>&1 &
+          echo $! > "$OUT/keepalive.pid"
+          echo "gui keep-awake started (caffeinate + activate loop)"
+
       - name: Trust the mock mail CA
         run: |
           set -euo pipefail
@@ -202,19 +217,55 @@ jobs:
           PW=$(( DW / 3 ))
           PH=$(( DH / 3 ))
           echo "device points: ${PW}x${PH}"
-          python3 poc/scripts/gui_drive.py \
+          # -u: unbuffered, so the log timestamps are the real print times and a
+          # hung gate is diagnosable instead of one flushed blob at exit.
+          python3 -u poc/scripts/gui_drive.py \
             --actions '${{ github.event.inputs.actions }}' \
             --out "$OUT" --device-width "$PW" --device-height "$PH" \
-            --map "$OUT/gui-mapping.json"
+            --map "$OUT/gui-mapping.json" \
+            --udid "$UDID" --bundle-id "${BID:-com.flowcrypt.as.ios.debug}" \
+            --console-log "$OUT/console-old-login.log" \
+            --imap-log /tmp/mock_mail/imap.log --smtp-log /tmp/mock_mail/smtp.log
+
+      - name: Post-run diagnostics
+        if: always()
+        run: |
+          set -uo pipefail
+          UDID='${{ steps.sim.outputs.udid }}'
           xcrun simctl io "$UDID" screenshot "$OUT/after-actions-device.png" || true
           screencapture -x "$OUT/after-actions-desktop.png" || true
-          echo "--- imap.log ---"; cat /tmp/mock_mail/imap.log || true
-          echo "--- console grep ---"; grep -aiE "LOGIN|mailcore|IMAP" "$OUT/console-old-login.log" | head -10 || true
+          echo "--- frontmost app ---"
+          osascript -e 'tell application "System Events" to get name of every process whose frontmost is true' || true
+          echo "--- simulator window rect ---"
+          osascript -e 'tell application "System Events" to tell process "Simulator" to get {position, size} of window 1' || true
+          echo "--- app process ---"
+          APP_PID=$(pgrep -f "FlowCrypt.app/FlowCrypt" | head -1)
+          if [ -n "$APP_PID" ]; then
+            echo "app pid=$APP_PID alive"
+            sample "$APP_PID" 3 -file "$OUT/app-sample.txt" || true
+            grep -aE "FlowCrypt|mach_msg|JSContext|realm|Core" "$OUT/app-sample.txt" 2>/dev/null | head -25 || true
+          else
+            echo "APP PROCESS NOT FOUND (crashed or exited)"
+          fi
+          echo "--- recent crash reports ---"
+          ls -lt "$HOME/Library/Logs/DiagnosticReports/" 2>/dev/null | head -6 || true
+          cp "$HOME"/Library/Logs/DiagnosticReports/FlowCrypt*.ips "$OUT/" 2>/dev/null || true
+          echo "--- render server / simulator faults (last 10m) ---"
+          log show --last 10m --predicate 'process CONTAINS "backboardd" OR process CONTAINS "Simulator" OR sender CONTAINS "CoreAnimation"' --style compact 2>/dev/null | grep -aiE "fault|error|hang|stall" | tail -20 || true
+          echo "--- console tail ---"
+          tail -5 "$OUT/console-old-login.log" || true
 
       - name: Stop video recording
         if: always()
         run: |
           set -uo pipefail
+          for helper in caffeinate keepalive; do
+            if [ -f "$OUT/$helper.pid" ]; then
+              PID=$(cat "$OUT/$helper.pid")
+              kill "$PID" 2>/dev/null || true
+              rm -f "$OUT/$helper.pid"
+            fi
+          done
           if [ -f "$OUT/vid.pid" ]; then
             PID=$(cat "$OUT/vid.pid")
             kill -INT "$PID" 2>/dev/null || true
@@ -225,6 +276,16 @@ jobs:
             kill -9 "$PID" 2>/dev/null || true
           fi
           ls -la "$OUT"/*.mp4 2>/dev/null || echo "no video produced"
+
+      - name: Reject frozen video
+        if: ${{ always() && github.event.inputs.actions != '' }}
+        run: |
+          set -uo pipefail
+          # A frozen framebuffer produces a convincing-looking video of one
+          # static frame. That artifact teaches a reviewer nothing about
+          # where the bug is, so it must never be uploaded as evidence.
+          command -v ffmpeg >/dev/null || brew install ffmpeg 2>&1 | tail -2
+          python3 poc/scripts/check_video_liveness.py "$OUT/demo-1-login.mp4" --fps 2
 
       - name: Collect evidence
         if: always()
@@ -250,6 +311,24 @@ jobs:
             echo "== PROOF: credentials seen by the mock servers =="
             grep -aiE "LOGIN|auth_plain|auth_login" /tmp/mock_mail/imap.log /tmp/mock_mail/smtp.log 2>/dev/null | head -20 || echo "(none yet)"
           } | tee "$OUT/SUMMARY.txt"
+
+      - name: Gate - credentials must be in the mock logs
+        if: ${{ always() && github.event.inputs.actions != '' }}
+        run: |
+          set -euo pipefail
+          echo "== imap.log =="
+          cat /tmp/mock_mail/imap.log 2>/dev/null || echo "(missing)"
+          echo "== smtp.log =="
+          cat /tmp/mock_mail/smtp.log 2>/dev/null || echo "(missing)"
+          # The whole PoC is this line: the app transmitted the password in
+          # the clear and the server wrote it down. Video and screenshots are
+          # corroboration; without this receipt there is no finding.
+          if ! grep -a "LOGIN" /tmp/mock_mail/imap.log 2>/dev/null | grep -aq "poc@mockmail.test"; then
+            echo "::error::No cleartext IMAP LOGIN for poc@mockmail.test in the mock server log - the PoC did not happen"
+            exit 1
+          fi
+          echo "POC CONFIRMED: cleartext IMAP LOGIN captured by the mock server"
+          grep -a "LOGIN" /tmp/mock_mail/imap.log | tail -3
 
       - name: Upload evidence
         if: always()

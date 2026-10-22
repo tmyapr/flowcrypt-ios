@@ -23,6 +23,15 @@ Actions (JSON list):
   {"do": "open_provider", "x": 200, "y": 629}  # tap "Other email provider" and retry
                                             # until the SetupImap form is really up
                                             # (green Connect below y=700 AND >=10 rows)
+  {"do": "liveness"}                        # prove the framebuffer still updates
+                                            # (terminate -> home screen -> relaunch);
+                                            # a frozen framebuffer once produced a
+                                            # 145s video of one static frame while
+                                            # the app navigated underneath it
+  {"do": "expect_login"}                    # the PoC gate: the mock IMAP log must
+                                            # contain a cleartext LOGIN line, or the
+                                            # run fails no matter how good the video
+                                            # looks
   {"do": "devshot", "name": "baseline-empty"}  # device-pixel screenshot
   {"do": "assert_diff", "ref": "baseline-empty", "min_delta": 1.0}  # tripwire: the
                                             # screen must have changed (input landed)
@@ -45,9 +54,22 @@ import time
 SIM_WINDOW_TITLE = "Simulator"
 
 
-def run(cmd, check=False):
-    return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True,
-                          text=True, check=check)
+def run(cmd, check=False, log=None):
+    res = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True,
+                         text=True, check=check)
+    if log is not None:
+        out = (res.stdout or "").strip()
+        err = (res.stderr or "").strip()
+        if out or err or res.returncode != 0:
+            printable = " ".join(cmd) if isinstance(cmd, list) else cmd
+            print(f"    $ {printable} -> rc={res.returncode}"
+                  + (f" out={out[:200]}" if out else "")
+                  + (f" err={err[:200]}" if err else ""), flush=True)
+    return res
+
+
+def say(msg):
+    print(msg, flush=True)
 
 
 def osa(script):
@@ -189,6 +211,20 @@ def find_green(path, y_from=500, device_h=874):
     return (round(sum(xs) / len(xs) / scale, 1), round(sum(ys) / len(ys) / scale, 1))
 
 
+def shot_diff(p1, p2, w=402, h=874):
+    """Mean absolute luminance difference between two screenshots."""
+    from PIL import Image
+    a = Image.open(p1).convert("L").resize((w, h))
+    b = Image.open(p2).convert("L").resize((w, h))
+    pa, pb = a.load(), b.load()
+    total = n = 0
+    for yy in range(0, h, 3):
+        for xx in range(0, w, 3):
+            total += abs(pa[xx, yy] - pb[xx, yy])
+            n += 1
+    return total / float(n)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--actions", required=True)
@@ -196,6 +232,13 @@ def main():
     ap.add_argument("--device-width", type=int, default=390)
     ap.add_argument("--device-height", type=int, default=844)
     ap.add_argument("--map", default=None, help="write measured mapping here")
+    ap.add_argument("--udid", default=None, help="simulator UDID (needed by liveness)")
+    ap.add_argument("--bundle-id", default=None, help="app bundle id (needed by liveness)")
+    ap.add_argument("--console-log", default=None,
+                    help="stamped console log; liveness appends a fresh "
+                         "--console-pty pipe to it after relaunching the app")
+    ap.add_argument("--imap-log", default="/tmp/mock_mail/imap.log")
+    ap.add_argument("--smtp-log", default="/tmp/mock_mail/smtp.log")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -283,17 +326,34 @@ def main():
                 run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
                 time.sleep(float(act.get("wait", 1.5)))
                 print(f"[{i}] clickgreen device({found[0]},{found[1]}) -> screen({sx:.0f},{sy:.0f})")
+            elif kind == "clicklastrow":
+                # Click the LAST text row detected on screen. On the FlowCrypt
+                # welcome screen that is the "Other email provider" button, and
+                # because the position is measured live it survives the +23pt
+                # row drift between runs that a baked coordinate does not.
+                shot_path = device_shot(os.path.join(args.out, "rows.png"))
+                rows = detect_rows(shot_path, device_h=args.device_height)
+                say(f"[{i}] clicklastrow: rows detected: {rows}")
+                if not rows:
+                    raise RuntimeError("clicklastrow: no rows on screen")
+                dx, dy = 201, int(round(rows[-1]))
+                sx, sy = to_screen(dx, dy)
+                run(["cliclick", f"m:{sx:.0f},{sy:.0f}"], log=True)
+                time.sleep(0.2)
+                run(["cliclick", f"c:{sx:.0f},{sy:.0f}"], log=True)
+                time.sleep(float(act.get("wait", 1.5)))
+                say(f"[{i}] clicklastrow device(201,{dy}) -> screen({sx:.0f},{sy:.0f})")
             elif kind == "open_provider":
-                # Tap "Other email provider" and retry until the SetupImap form is
-                # verifiably on screen. This gate exists because a blind click list
-                # once walked straight through the Privacy webview and typed into
-                # nothing. The form counts as up only when a wide green primary
-                # button sits below y=700 AND at least 10 text rows are detectable:
-                # the welcome screen has no green button at all, and a pushed
-                # webview can have green pixels but never a bottom-anchored one.
-                x = float(act.get("x", 200))
-                y = float(act.get("y", 629))
-                deadline = time.time() + float(act.get("timeout", 90))
+                # Tap "Other email provider" (adaptive: last detected row) and
+                # retry until the SetupImap form is verifiably on screen. This
+                # gate exists because a blind click list once walked through
+                # the wrong screen and typed into nothing. The form counts as
+                # up only when a wide green primary button sits below y=700 AND
+                # at least 10 text rows are detectable: the welcome screen has
+                # no green button at all, and a pushed webview can have green
+                # pixels but never a bottom-anchored one.
+                timeout = float(act.get("timeout", 240))
+                deadline = time.time() + timeout
                 attempt = 0
                 up = False
                 while time.time() < deadline:
@@ -301,38 +361,132 @@ def main():
                     probe = device_shot(os.path.join(args.out, "open-provider-probe.png"))
                     rows = detect_rows(probe, device_h=args.device_height)
                     green = find_green(probe, device_h=args.device_height)
+                    say(f"[{i}] open_provider probe: rows={rows} green={green}")
                     if green and green[1] > 700 and len(rows) >= 10:
                         up = True
-                        print(f"[{i}] open_provider: form already up (green {green}, {len(rows)} rows)")
+                        say(f"[{i}] open_provider: form already up (green {green}, {len(rows)} rows)")
                         break
                     if green and green[1] <= 700:
                         # webview-like screen (e.g. Privacy): pop it first
                         bx, by = to_screen(30, 115)
-                        run(["cliclick", f"m:{bx:.0f},{by:.0f}"])
+                        run(["cliclick", f"m:{bx:.0f},{by:.0f}"], log=True)
                         time.sleep(0.2)
-                        run(["cliclick", f"c:{bx:.0f},{by:.0f}"])
+                        run(["cliclick", f"c:{bx:.0f},{by:.0f}"], log=True)
                         time.sleep(2.0)
-                        print(f"[{i}] open_provider: webview detected (green {green}), pressed back")
-                    sx, sy = to_screen(x, y)
-                    run(["cliclick", f"m:{sx:.0f},{sy:.0f}"])
+                        say(f"[{i}] open_provider: webview detected (green {green}), pressed back")
+                    if rows:
+                        dx, dy = 201, int(round(rows[-1]))
+                    else:
+                        dx, dy = float(act.get("x", 200)), float(act.get("y", 629))
+                    sx, sy = to_screen(dx, dy)
+                    run(["cliclick", f"m:{sx:.0f},{sy:.0f}"], log=True)
                     time.sleep(0.2)
-                    run(["cliclick", f"c:{sx:.0f},{sy:.0f}"])
-                    t2 = min(time.time() + float(act.get("per_try", 15)), deadline)
+                    run(["cliclick", f"c:{sx:.0f},{sy:.0f}"], log=True)
+                    say(f"[{i}] open_provider attempt {attempt}: clicked device({dx},{dy})")
+                    t2 = min(time.time() + float(act.get("per_try", 40)), deadline)
                     while time.time() < t2:
-                        time.sleep(2.0)
+                        time.sleep(float(act.get("poll", 3.0)))
                         probe = device_shot(os.path.join(args.out, "open-provider-probe.png"))
                         rows = detect_rows(probe, device_h=args.device_height)
                         green = find_green(probe, device_h=args.device_height)
+                        say(f"[{i}] open_provider poll: rows={rows} green={green}")
                         if green and green[1] > 700 and len(rows) >= 10:
                             up = True
                             break
                     if up:
                         break
-                    print(f"[{i}] open_provider attempt {attempt}: form not up yet "
-                          f"(green={green}, rows={len(rows)})")
                 if not up:
-                    raise RuntimeError("open_provider: SetupImap form never appeared")
-                print(f"[{i}] open_provider: form up after {attempt} attempt(s)")
+                    raise RuntimeError(
+                        f"open_provider: SetupImap form never appeared in {timeout}s")
+                say(f"[{i}] open_provider: form up after {attempt} attempt(s)")
+            elif kind == "liveness":
+                # Prove the device framebuffer still updates before any
+                # screenshot-based verdict is trusted. Run 2 shipped a 145s
+                # video of one static welcome frame while the app console
+                # proved SetupImapViewController had loaded: the framebuffer
+                # had stalled mid-push and every later "form never appeared"
+                # probe was reading a dead buffer. Terminating the app must
+                # produce the home screen; if the pixels do not move, the run
+                # fails loudly instead of shipping convincing fake evidence.
+                if not args.udid or not args.bundle_id:
+                    raise RuntimeError("liveness: needs --udid and --bundle-id")
+                stamp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "stamp.py")
+
+                def liveness_attempt(tag):
+                    a = device_shot(os.path.join(args.out, f"liveness-{tag}-app.png"))
+                    run(["xcrun", "simctl", "terminate", args.udid, args.bundle_id],
+                        log=True)
+                    time.sleep(2.5)
+                    b = device_shot(os.path.join(args.out, f"liveness-{tag}-home.png"))
+                    d1 = shot_diff(a, b)
+                    say(f"[{i}] liveness({tag}): app->home mean|dL|={d1:.2f}")
+                    if d1 <= 1.0:
+                        return False, d1
+                    # Relaunch with a fresh console pipe appended to the same
+                    # stamped log, so the form-fill run keeps its evidence.
+                    run(["pkill", "-f", "console-pty"], log=True)
+                    if args.console_log:
+                        pipe = (f"nohup bash -c 'xcrun simctl launch --console-pty "
+                                f"{args.udid} {args.bundle_id} 2>&1 | python3 {stamp} "
+                                f">> {args.console_log}' > /dev/null 2>&1 &")
+                    else:
+                        pipe = f"nohup xcrun simctl launch {args.udid} {args.bundle_id} > /dev/null 2>&1 &"
+                    run(pipe, log=True)
+                    c, d2 = None, 0.0
+                    deadline = time.time() + 90
+                    while time.time() < deadline:
+                        time.sleep(3)
+                        c = device_shot(os.path.join(args.out,
+                                                     f"liveness-{tag}-relaunch.png"))
+                        d2 = shot_diff(b, c)
+                        if d2 > 1.0:
+                            break
+                    say(f"[{i}] liveness({tag}): home->app mean|dL|={d2:.2f}")
+                    return d2 > 1.0, d2
+
+                ok, delta = liveness_attempt("1")
+                if not ok:
+                    say(f"[{i}] liveness: framebuffer looks frozen "
+                        f"(delta={delta:.2f}); waking display and retrying")
+                    run(["caffeinate", "-u", "-t", "3"], log=True)
+                    run(["osascript", "-e", 'tell application "Simulator" to activate'])
+                    time.sleep(3)
+                    ok, delta = liveness_attempt("2")
+                if not ok:
+                    raise RuntimeError(
+                        "liveness: device framebuffer is frozen - screenshots and "
+                        "video would be stale, refusing to produce fake evidence")
+                say(f"[{i}] liveness: framebuffer live (delta={delta:.2f})")
+            elif kind == "expect_login":
+                # The vulnerability proof, independent of any screenshot: the
+                # mock IMAP server logs every received line, so a LOGIN command
+                # carrying the cleartext password IS the receipt. No LOGIN line
+                # means the PoC did not happen, however good the video looks.
+                email = act.get("email", "poc@mockmail.test")
+                txt = ""
+                try:
+                    with open(args.imap_log) as fh:
+                        txt = fh.read()
+                except OSError as exc:
+                    raise RuntimeError(f"expect_login: cannot read {args.imap_log}: {exc}")
+                hits = [ln for ln in txt.splitlines()
+                        if "LOGIN" in ln.upper() and email in ln]
+                say(f"[{i}] expect_login: {len(hits)} LOGIN line(s) in {args.imap_log}")
+                for ln in hits[-3:]:
+                    say(f"    {ln[:240]}")
+                if not hits:
+                    raise RuntimeError(
+                        f"expect_login: no LOGIN {email} in {args.imap_log} - "
+                        "credentials never reached the mock server")
+                try:
+                    with open(args.smtp_log) as fh:
+                        stxt = fh.read()
+                    auth = [ln for ln in stxt.splitlines() if "AUTH" in ln.upper()]
+                    say(f"[{i}] expect_login: {len(auth)} SMTP AUTH line(s) "
+                        f"in {args.smtp_log}")
+                except OSError:
+                    pass
             elif kind == "devshot":
                 path = os.path.join(args.out, act["name"] + ".png")
                 device_shot(path)
