@@ -32,7 +32,7 @@ cat > server.ext <<'EXT'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:imap.mockmail.test,DNS:smtp.mockmail.test
+subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:imap.mockmail.test,DNS:smtp.mockmail.test,DNS:imap.mail.yahoo.com,DNS:smtp.mail.yahoo.com
 EXT
 
 openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \

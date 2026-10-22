@@ -526,7 +526,7 @@ def main():
                 # mock IMAP server logs every received line, so a LOGIN command
                 # carrying the cleartext password IS the receipt. No LOGIN line
                 # means the PoC did not happen, however good the video looks.
-                email = act.get("email", "poc@mockmail.test")
+                email = act.get("email", "poc@yahoo.com")
                 txt = ""
                 try:
                     with open(args.imap_log) as fh:

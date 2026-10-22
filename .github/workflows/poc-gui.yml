@@ -29,7 +29,12 @@ on:
         default: 'macos-15-intel'
 
 env:
-  POC_EMAIL: poc@mockmail.test
+  # Yahoo is a MailCore-known non-Gmail provider: the app auto-fills real
+  # IMAP/SMTP settings (993/465, implicit TLS) from its provider database,
+  # which is the only path that puts a real port into the user model.
+  # Unknown domains (e.g. mockmail.test) leave port 0 in the model and
+  # MailCore then dials port 0, so the mock never sees a connection.
+  POC_EMAIL: poc@yahoo.com
   POC_PASSWORD: 'PocPassw0rd!'
   OUT: ${{ github.workspace }}/poc-out
 
@@ -150,9 +155,12 @@ jobs:
       - name: Point the mock hostnames at localhost
         run: |
           set -euo pipefail
-          echo "127.0.0.1 imap.mockmail.test smtp.mockmail.test" | sudo tee -a /etc/hosts
+          # Redirect the provider's real hostnames to the mock servers on this
+          # runner. The app itself is unmodified: it still believes it is
+          # talking to imap.mail.yahoo.com / smtp.mail.yahoo.com.
+          echo "127.0.0.1 imap.mail.yahoo.com smtp.mail.yahoo.com" | sudo tee -a /etc/hosts
           tail -2 /etc/hosts
-          python3 -c "import socket;print(socket.gethostbyname('imap.mockmail.test'), socket.gethostbyname('smtp.mockmail.test'))"
+          python3 -c "import socket;print(socket.gethostbyname('imap.mail.yahoo.com'), socket.gethostbyname('smtp.mail.yahoo.com'))"
 
       - name: Start mock IMAP/SMTP servers
         run: |
@@ -161,8 +169,8 @@ jobs:
           sudo mkdir -p /tmp/mock_mail
           sudo chmod 777 /tmp/mock_mail
           TLS=(--cert "$OUT/certs/server-chain.pem" --key "$OUT/certs/server.key")
-          # 993/465 are what the app auto-fills from the domain, and they are
-          # privileged, so the mocks run as root.
+          # 993/465 are what the app auto-fills from the provider database
+          # (Yahoo), and they are privileged, so the mocks run as root.
           sudo nohup python3 -u poc/mock_mail/imap_server.py --port 993 --log /tmp/mock_mail/imap.log "${TLS[@]}" > "$OUT/mock-imap.stdout" 2>&1 &
           sudo nohup python3 -u poc/mock_mail/smtp_server.py --port 465 --log /tmp/mock_mail/smtp.log "${TLS[@]}" > "$OUT/mock-smtp.stdout" 2>&1 &
           python3 poc/scripts/wait_ports.py 993 465 --timeout=45
@@ -326,8 +334,8 @@ jobs:
           # The whole PoC is this line: the app transmitted the password in
           # the clear and the server wrote it down. Video and screenshots are
           # corroboration; without this receipt there is no finding.
-          if ! grep -a "LOGIN" /tmp/mock_mail/imap.log 2>/dev/null | grep -aq "poc@mockmail.test"; then
-            echo "::error::No cleartext IMAP LOGIN for poc@mockmail.test in the mock server log - the PoC did not happen"
+          if ! grep -a "LOGIN" /tmp/mock_mail/imap.log 2>/dev/null | grep -aq "$POC_EMAIL"; then
+            echo "::error::No cleartext IMAP LOGIN for $POC_EMAIL in the mock server log - the PoC did not happen"
             exit 1
           fi
           echo "POC CONFIRMED: cleartext IMAP LOGIN captured by the mock server"
