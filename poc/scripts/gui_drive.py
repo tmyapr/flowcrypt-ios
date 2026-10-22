@@ -595,32 +595,25 @@ def main():
                     secs, ports = find_security_rows(
                         probe, device_h=args.device_height)
                     say(f"[{i}] {tag} cycle {cycle}: securities={secs} ports={ports}")
-                    if not secs:
-                        say(f"[{i}] {tag}: no security row on screen, retrying")
+                    if len(secs) < 2:
+                        # clear_input runs before this action, so both
+                        # security rows must be on screen; anything else
+                        # is an unknown state - retry, then fail loudly
+                        say(f"[{i}] {tag}: expected 2 security rows, "
+                            f"got {secs}; retrying")
                         time.sleep(2.0)
                         continue
-                    if len(secs) >= 2:
-                        target = secs[0] if which == "imap" else secs[-1]
-                    else:
-                        # only one security row visible (the other can sit
-                        # behind the keyboard): the IMAP security row is
-                        # always in the upper form (~y 470), the SMTP one
-                        # in the lower (~y 690) - 220pt apart, so a cut at
-                        # 600 survives any scroll shift
-                        only = secs[0]
-                        is_imap_row = only[0] < 600
-                        if (which == "imap") != is_imap_row:
-                            say(f"[{i}] {tag}: only {only} visible but it is "
-                                f"the {'IMAP' if is_imap_row else 'SMTP'} "
-                                f"row; retrying")
-                            time.sleep(2.0)
-                            continue
-                        target = only
+                    # the form order is fixed: upper security row = IMAP,
+                    # lower = SMTP. SMTP is set first, so by the IMAP step
+                    # the lower row already reads "none" and only the
+                    # upper one is left to flip.
+                    target = secs[0] if which == "imap" else secs[-1]
                     ty, kind_now = target
                     if kind_now == "none":
                         say(f"[{i}] {tag}: already none at y={ty}")
                         settled = True
                         break
+                    tls_before = sum(1 for _, k in secs if k == "tls")
                     pre = device_shot(os.path.join(args.out, f"sec-{which}-{cycle}-pre.png"))
                     opened = False
                     for dx, dy_off in ((201, 0), (170, 0), (240, 0), (201, -10), (201, 10)):
@@ -659,20 +652,28 @@ def main():
                     say(f"[{i}] {tag} after Done: securities={secs2}")
                     if not secs2:
                         continue
+                    # Verify structurally, not by absolute position: the
+                    # form scrolls when the picker opens, so the row that
+                    # was upper/lower before stays upper/lower after, and
+                    # exactly one "tls" must have disappeared. A keyboard
+                    # raised by Done (IMAP Done moves focus to the SMTP
+                    # server field) can hide the lower row, so the
+                    # tls-count carries the verdict when only one row
+                    # remains readable.
+                    tls_after = sum(1 for _, k in secs2 if k == "tls")
                     if len(secs2) >= 2:
                         t2 = secs2[0] if which == "imap" else secs2[-1]
+                        ok = t2[1] == "none"
                     else:
-                        # same upper/lower cut as the probe: with the
-                        # keyboard up after Done only one row stays visible
                         t2 = secs2[0]
-                        if ((which == "imap") != (t2[0] < 600)):
-                            say(f"[{i}] {tag}: verify saw only {t2}, wrong row")
-                            continue
-                    if t2[1] == "none":
-                        say(f"[{i}] {tag}: SETTLED none at y={t2[0]}")
+                        ok = tls_after < tls_before
+                    if ok:
+                        say(f"[{i}] {tag}: SETTLED none (row {t2}, "
+                            f"tls {tls_before}->{tls_after})")
                         settled = True
                         break
-                    say(f"[{i}] {tag}: still {t2[1]} at y={t2[0]}, retrying")
+                    say(f"[{i}] {tag}: not settled (row {t2}, "
+                        f"tls {tls_before}->{tls_after}); retrying")
                 if not settled:
                     raise RuntimeError(
                         f"{tag}: could not set security to none in {cycles} "
@@ -812,12 +813,54 @@ def main():
                 # probe was reading a dead buffer. Terminating the app must
                 # produce the home screen; if the pixels do not move, the run
                 # fails loudly instead of shipping convincing fake evidence.
+                #
+                # Run 3 added a second failure mode that looks identical by
+                # pixels: the app DIED on the runner ~45s after launch (its
+                # last frame froze on screen, terminate reported "found
+                # nothing to terminate", video came out 0.07s). A dead app
+                # is not a frozen framebuffer, so the check now ensures the
+                # app is actually running first - fresh launch plus proof of
+                # fresh console output - and only then runs the pixel test.
                 if not args.udid or not args.bundle_id:
                     raise RuntimeError("liveness: needs --udid and --bundle-id")
                 stamp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "stamp.py")
 
+                def console_size():
+                    try:
+                        return os.path.getsize(args.console_log)
+                    except OSError:
+                        return 0
+
+                def relaunch_pipe():
+                    run(["pkill", "-f", "console-pty"], log=True)
+                    if args.console_log:
+                        return (f"nohup bash -c 'xcrun simctl launch --console-pty "
+                                f"{args.udid} {args.bundle_id} 2>&1 | python3 {stamp} "
+                                f">> {args.console_log}' > /dev/null 2>&1 &")
+                    return (f"nohup xcrun simctl launch {args.udid} {args.bundle_id} "
+                            f"> /dev/null 2>&1 &")
+
                 def liveness_attempt(tag):
+                    # ensure-alive: stop whatever is there, launch fresh,
+                    # and wait for the console to prove the app came up
+                    run(["xcrun", "simctl", "terminate", args.udid, args.bundle_id],
+                        log=True)
+                    time.sleep(2.0)
+                    size0 = console_size()
+                    run(relaunch_pipe(), log=True)
+                    up = False
+                    deadline = time.time() + 120
+                    while time.time() < deadline:
+                        time.sleep(3)
+                        if console_size() > size0 + 50:
+                            up = True
+                            break
+                    if not up:
+                        say(f"[{i}] liveness({tag}): app produced no console "
+                            f"output after relaunch (dead on arrival?)")
+                        return False, 0.0
+                    time.sleep(4)  # let the first screen render
                     a = device_shot(os.path.join(args.out, f"liveness-{tag}-app.png"))
                     run(["xcrun", "simctl", "terminate", args.udid, args.bundle_id],
                         log=True)
@@ -829,14 +872,7 @@ def main():
                         return False, d1
                     # Relaunch with a fresh console pipe appended to the same
                     # stamped log, so the form-fill run keeps its evidence.
-                    run(["pkill", "-f", "console-pty"], log=True)
-                    if args.console_log:
-                        pipe = (f"nohup bash -c 'xcrun simctl launch --console-pty "
-                                f"{args.udid} {args.bundle_id} 2>&1 | python3 {stamp} "
-                                f">> {args.console_log}' > /dev/null 2>&1 &")
-                    else:
-                        pipe = f"nohup xcrun simctl launch {args.udid} {args.bundle_id} > /dev/null 2>&1 &"
-                    run(pipe, log=True)
+                    run(relaunch_pipe(), log=True)
                     c, d2 = None, 0.0
                     deadline = time.time() + 90
                     while time.time() < deadline:
