@@ -25,7 +25,12 @@
   },
   {
     "do": "type",
-    "text": "poc@yahoo.com"
+    "text": "poc@yahoo.com",
+    "wait": 15.0
+  },
+  {
+    "do": "sleep",
+    "seconds": 5
   },
 
   {
@@ -35,17 +40,22 @@
   },
   {
     "do": "type",
-    "text": "PocPassw0rd!"
+    "text": "PocPassw0rd!",
+    "wait": 15.0
+  },
+  {
+    "do": "sleep",
+    "seconds": 5
   },
 
   {
     "do": "clickrow",
-    "row": 8,
+    "row": 12,
     "wait": 1.5
   },
   {
     "do": "shot",
-    "name": "login-02a-imap-security"
+    "name": "login-02a-smtp-security"
   },
   {
     "do": "click",
@@ -55,17 +65,17 @@
   },
   {
     "do": "shot",
-    "name": "login-02b-after-done"
+    "name": "login-02b-smtp-done"
   },
 
   {
     "do": "clickrow",
-    "row": 11,
+    "row": 8,
     "wait": 1.5
   },
   {
     "do": "shot",
-    "name": "login-02c-smtp-security"
+    "name": "login-02c-imap-security"
   },
   {
     "do": "click",
@@ -76,28 +86,6 @@
   {
     "do": "shot",
     "name": "login-02d-dismissed"
-  },
-  {
-    "do": "clickrow",
-    "row": 12,
-    "wait": 1.5
-  },
-  {
-    "do": "click",
-    "x": 50,
-    "y": 654,
-    "wait": 1.5
-  },
-  {
-    "do": "clickrow",
-    "row": 11,
-    "wait": 1.5
-  },
-  {
-    "do": "click",
-    "x": 50,
-    "y": 654,
-    "wait": 1.5
   },
 
   {
