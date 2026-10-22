@@ -172,6 +172,11 @@ def detect_rows(path, device_h=874, thr=215, lo=110, hi=800, min_dark=6):
     draws dark text and the list is stable: 1 Account info, 2 Email, 3 Username,
     4 Password, 5 Incoming, 6 IMAP server, 7 IMAP port, 8 Security, 9 Outgoing,
     10 SMTP server, 11 SMTP port, 12 Security.
+
+    A freshly typed hostname can split into two dark bands - the text itself and
+    its spellcheck underline ~8pt below it. Real rows sit ~55pt apart, so bands
+    closer than 25pt are merged; without this, every clickrow after the first
+    filled field lands one row off (run 4: "993" never reached the port field).
     """
     from PIL import Image
 
@@ -188,7 +193,12 @@ def detect_rows(path, device_h=874, thr=215, lo=110, hi=800, min_dark=6):
             if yy - start >= 5:
                 out.append(round((start + yy) / 2.0 / scale, 1))
             start = None
-    return out
+    merged = []
+    for r in out:
+        if merged and r - merged[-1] < 25:
+            continue
+        merged.append(r)
+    return merged
 
 
 def find_green(path, y_from=500, device_h=874):
